@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment — NEVER commit this
+.env
+.env.local
+.env.production
+
+# Prisma
+prisma/migrations/*/migration_lock.toml
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Test coverage
+docs/coverage/
+coverage/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.pid
+*.seed
+*.pid.lock
+
+# TypeScript incremental build
+*.tsbuildinfo
+
+# Docker volumes (local dev data)
+.docker-data/
+/generated/prisma

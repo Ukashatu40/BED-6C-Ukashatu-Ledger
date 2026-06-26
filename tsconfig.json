@@ -1,0 +1,41 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": true,
+    "removeComments": true,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "allowSyntheticDefaultImports": true,
+    "target": "ES2022",
+    "sourceMap": true,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "incremental": true,
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "noImplicitAny": true,
+    "strictBindCallApply": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "exactOptionalPropertyTypes": true,
+    "paths": {
+      "@config/*": ["src/config/*"],
+      "@common/*": ["src/common/*"],
+      "@database/*": ["src/database/*"],
+      "@accounts/*": ["src/accounts/*"],
+      "@ledger/*": ["src/ledger/*"],
+      "@transactions/*": ["src/transactions/*"],
+      "@fx/*": ["src/fx/*"],
+      "@reversals/*": ["src/reversals/*"],
+      "@audit/*": ["src/audit/*"],
+      "@reporting/*": ["src/reporting/*"],
+      "@health/*": ["src/health/*"]
+    }
+  },
+  "include": ["src/**/*", "seeds/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
+}
