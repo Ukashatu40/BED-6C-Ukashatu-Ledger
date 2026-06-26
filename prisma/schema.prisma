@@ -1,0 +1,488 @@
+// prisma/schema.prisma
+// =============================================================================
+// NovaPay Ledger System — Prisma Schema
+// Assessment: Zetheta BED-6C
+// =============================================================================
+//
+// DESIGN PRINCIPLES:
+//   1. NUMERIC(19,4) for all monetary amounts — never FLOAT or DOUBLE
+//   2. UUID v7 for all primary keys — time-sortable, no sequential enumeration
+//   3. TIMESTAMPTZ everywhere — stored in UTC, displayed in local tz at API layer
+//   4. All tables are append-only once posted — enforced by PG triggers (migration 003)
+//   5. Prisma handles standard CRUD; raw SQL handles locking, triggers, partitions
+//
+// NOTE ON PRISMA + PARTITIONING:
+//   ledger_entries will be converted to a range-partitioned table in migration 008.
+//   Prisma does not natively support declarative partitioning — we manage partitions
+//   via raw SQL migrations and the partition-manager script.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider          = "postgresql"
+  // url               = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+/// Account classification following standard accounting taxonomy.
+/// Determines normal balance side (debit for Asset/Expense, credit for others).
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+  CONTRA_ASSET
+  CONTRA_REVENUE
+}
+
+/// Account sub-classification for reporting grouping.
+enum AccountSubType {
+  CURRENT_ASSET
+  NON_CURRENT_ASSET
+  CURRENT_LIABILITY
+  NON_CURRENT_LIABILITY
+  RETAINED_EARNINGS
+  SHARE_CAPITAL
+  OPERATING_REVENUE
+  NON_OPERATING_REVENUE
+  OPERATING_EXPENSE
+  MARKETING_EXPENSE
+  FINANCIAL_EXPENSE
+  FX_HOLDING
+}
+
+/// Lifecycle state of an account.
+enum AccountStatus {
+  ACTIVE
+  INACTIVE
+  CLOSED
+  SUSPENDED
+}
+
+/// Direction of a ledger entry — the core of double-entry bookkeeping.
+enum EntryType {
+  DEBIT
+  CREDIT
+}
+
+/// Lifecycle state of a ledger entry.
+/// Once POSTED, the entry is immutable. Corrections are made via new REVERSAL entries.
+enum EntryStatus {
+  PENDING   // Entry created but not yet committed to the ledger
+  POSTED    // Entry committed — IMMUTABLE from this point forward
+  REVERSED  // Entry has been reversed by a corrective journal entry
+}
+
+/// All 20 transaction types the ledger supports.
+enum TransactionType {
+  CUSTOMER_DEPOSIT_BANK
+  CUSTOMER_DEPOSIT_CARD
+  CUSTOMER_WITHDRAWAL_BANK
+  P2P_TRANSFER
+  MERCHANT_PAYMENT_QR
+  MERCHANT_PAYMENT_ONLINE
+  BILL_PAYMENT
+  INTEREST_ACCRUAL
+  INTEREST_PAYOUT
+  FEE_DEDUCTION_MONTHLY
+  CASHBACK_CREDIT
+  PROMOTIONAL_CREDIT
+  LOAN_DISBURSEMENT
+  LOAN_EMI_PAYMENT
+  FX_CONVERSION
+  REFUND_FULL
+  REFUND_PARTIAL
+  CHARGEBACK
+  REWARD_REDEMPTION
+  ACCOUNT_CLOSURE_SWEEP
+}
+
+/// Lifecycle state of a transaction.
+enum TransactionStatus {
+  INITIATED
+  PROCESSING
+  POSTED
+  FAILED
+  REJECTED
+  REVERSAL_PENDING
+  REVERSED
+}
+
+/// Idempotency key processing state.
+enum IdempotencyStatus {
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+/// Fee refund policy for partial refunds.
+enum RefundFeePolicy {
+  PROPORTIONAL  // Refund fees in proportion to the refunded amount
+  FULL          // Refund all fees regardless of partial amount (platform/merchant error)
+  NONE          // Retain fees (customer-initiated return)
+}
+
+// =============================================================================
+// ACCOUNTS — Chart of Accounts
+// =============================================================================
+
+/// Represents a single account in the Chart of Accounts.
+///
+/// Every financial position in the system is an account.
+/// Accounts never store a balance directly — balances are always derived
+/// by summing ledger entries (SUM debits - SUM credits, sign-adjusted by account type).
+///
+/// This append-only design means account metadata CAN be updated (name, status)
+/// but the ledger entries that define its balance never can.
+model Account {
+  id          String         @id @default(uuid()) @db.Uuid
+  /// Hierarchical code: 1xxx=Asset, 2xxx=Liability, 3xxx=Equity, 4xxx=Revenue, 5xxx=Expense
+  code        String         @unique @db.VarChar(20)
+  name        String         @db.VarChar(255)
+  type        AccountType
+  subType     AccountSubType @map("sub_type")
+  /// ISO 4217 currency code — accounts are single-currency
+  currency    String         @db.Char(3)
+  status      AccountStatus  @default(ACTIVE)
+  /// Optional: the parent account for hierarchical CoA structures
+  parentId    String?        @map("parent_id") @db.Uuid
+  parent      Account?       @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children    Account[]      @relation("AccountHierarchy")
+  description String?        @db.Text
+  /// Metadata: KYC tier, merchant category code, loan terms, etc.
+  metadata    Json?          @db.JsonB
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt   DateTime       @updatedAt @map("updated_at") @db.Timestamptz()
+
+  // Relations
+  ledgerEntries       LedgerEntry[]
+  balanceSnapshots    BalanceSnapshot[]
+  transactionLimits   TransactionLimit[]
+
+  @@index([type])
+  @@index([currency])
+  @@index([status])
+  @@index([parentId])
+  @@map("accounts")
+}
+
+// =============================================================================
+// LEDGER ENTRIES — The immutable record of every financial event
+// =============================================================================
+
+/// A single line in a journal entry — one debit or one credit.
+///
+/// Every financial event produces at least two LedgerEntries (one debit, one credit)
+/// grouped under the same journalId. The sum of all debits in a journal must
+/// exactly equal the sum of all credits — enforced in application code BEFORE
+/// the database transaction is committed, and verified by the audit service.
+///
+/// IMMUTABILITY: Once status = POSTED, this row must never be updated or deleted.
+/// Enforced by a PostgreSQL BEFORE UPDATE/DELETE trigger (migration 003).
+/// Corrections are made by creating new REVERSAL journal entries.
+///
+/// HASH CHAIN: Each entry stores a SHA-256 hash of its own data concatenated
+/// with the previous entry's hash. This forms a cryptographic chain that makes
+/// any tampering detectable — the hash chain breaks at the tampered entry.
+model LedgerEntry {
+  id            String      @id @default(uuid()) @db.Uuid
+  /// Groups all debit/credit lines of a single financial event together
+  journalId     String      @map("journal_id") @db.Uuid
+  accountId     String      @map("account_id") @db.Uuid
+  account       Account     @relation(fields: [accountId], references: [id])
+  entryType     EntryType   @map("entry_type")
+  /// NUMERIC(19,4): supports up to 999,999,999,999,999.9999 — never FLOAT
+  amount        Decimal     @db.Decimal(19, 4)
+  /// ISO 4217 — must match the account's currency
+  currency      String      @db.Char(3)
+  status        EntryStatus @default(PENDING)
+  /// When the transaction economically takes effect (may differ from posted_at)
+  effectiveDate DateTime    @map("effective_date") @db.Timestamptz()
+  /// When this system recorded the entry — set by DB DEFAULT NOW(), immutable
+  postedAt      DateTime?   @map("posted_at") @db.Timestamptz()
+  /// The user, service, or system actor that initiated this entry
+  createdBy     String      @map("created_by") @db.VarChar(255)
+  /// Client-supplied key preventing duplicate processing of the same transaction
+  idempotencyKey String?    @map("idempotency_key") @db.VarChar(128)
+  /// Type of originating transaction for filtering and reporting
+  referenceType  TransactionType  @map("reference_type")
+  /// UUID of the originating transaction record
+  referenceId    String      @map("reference_id") @db.Uuid
+  /// Human-readable description for account statements
+  narrative      String      @db.Text
+  /// SHA-256 hash of (own data fields + previous_hash) — forms the audit chain
+  hash           String      @db.Char(64)
+  /// Hash of the immediately preceding entry — '000...000' for genesis entry
+  previousHash   String      @map("previous_hash") @db.Char(64)
+  /// Extensible: IP address, device ID, geolocation, session ID
+  metadata       Json?       @db.JsonB
+
+  @@index([journalId])
+  @@index([accountId])
+  @@index([referenceId])
+  @@index([referenceType])
+  @@index([effectiveDate])
+  @@index([status])
+  @@index([currency])
+  @@index([createdBy])
+  /// Composite: account + date — primary access pattern for statements
+  @@index([accountId, effectiveDate])
+  @@map("ledger_entries")
+}
+
+// =============================================================================
+// BALANCE SNAPSHOTS — Read-optimised balance cache
+// =============================================================================
+
+/// Materialised balance cache updated after each committed journal entry.
+///
+/// The authoritative balance is always derived from SUM(ledger_entries).
+/// This table is a performance optimisation for the read path — it lets
+/// balance queries skip the full ledger scan and instead read a recent
+/// checkpoint, then apply only the delta since that checkpoint.
+///
+/// Updated by a PostgreSQL function called after each journal entry commit.
+/// NEVER used as the source of truth for write decisions — always re-derive
+/// from ledger_entries inside a locked transaction before debiting.
+model BalanceSnapshot {
+  id          String   @id @default(uuid()) @db.Uuid
+  accountId   String   @map("account_id") @db.Uuid
+  account     Account  @relation(fields: [accountId], references: [id])
+  /// The derived balance as of snapshot_at
+  balance     Decimal  @db.Decimal(19, 4)
+  currency    String   @db.Char(3)
+  snapshotAt  DateTime @map("snapshot_at") @db.Timestamptz()
+  /// The ledger entry that triggered this snapshot update
+  triggeredBy String   @map("triggered_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([accountId])
+  @@index([accountId, snapshotAt])
+  @@map("balance_snapshots")
+}
+
+// =============================================================================
+// EXCHANGE RATE SNAPSHOTS — Immutable FX rate record
+// =============================================================================
+
+/// Records every exchange rate used in a transaction.
+///
+/// This table is itself immutable — rates are never updated, only new
+/// snapshots are inserted. When a conversion is performed, the system
+/// fetches the current valid rate and stores its snapshot_id on the
+/// ledger entry for audit traceability.
+///
+/// The spec (Case Study 2 — Revolut rounding incident) requires that
+/// all rate arithmetic uses NUMERIC precision — rate is stored as
+/// NUMERIC(18,8) to preserve sub-pip precision.
+model ExchangeRateSnapshot {
+  id             String    @id @default(uuid()) @db.Uuid
+  /// ISO 4217 base currency (e.g., USD)
+  baseCurrency   String    @map("base_currency") @db.Char(3)
+  /// ISO 4217 quote currency (e.g., INR)
+  quoteCurrency  String    @map("quote_currency") @db.Char(3)
+  /// 1 base = rate quote (e.g., 1 USD = 83.42150000 INR)
+  rate           Decimal   @db.Decimal(18, 8)
+  /// 1 quote = inverse_rate base (pre-computed, stored for audit)
+  inverseRate    Decimal   @map("inverse_rate") @db.Decimal(18, 8)
+  /// Rate provider: RBI_REFERENCE | OPEN_EXCHANGE_RATES | INTERNAL
+  source         String    @db.VarChar(50)
+  capturedAt     DateTime  @map("captured_at") @db.Timestamptz()
+  validFrom      DateTime  @map("valid_from") @db.Timestamptz()
+  /// NULL means this rate is currently active
+  validUntil     DateTime? @map("valid_until") @db.Timestamptz()
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([baseCurrency, quoteCurrency])
+  @@index([validFrom])
+  @@index([validUntil])
+  /// Find current valid rate for a pair
+  @@index([baseCurrency, quoteCurrency, validFrom, validUntil])
+  @@map("exchange_rate_snapshots")
+}
+
+// =============================================================================
+// IDEMPOTENCY KEYS — Exactly-once processing guarantee
+// =============================================================================
+
+/// Prevents duplicate transaction processing on network retries.
+///
+/// Every state-mutating API request must include X-Idempotency-Key header.
+/// The first request with a given key processes normally.
+/// Subsequent requests with the same key return the stored response immediately.
+///
+/// Key expiry: 24 hours (configurable via IDEMPOTENCY_TTL_HOURS).
+/// After expiry, the same key may be reused for a new transaction.
+model IdempotencyKey {
+  id            String            @id @default(uuid()) @db.Uuid
+  /// The client-supplied key (UUID v4 or up to 128-char string)
+  key           String            @db.VarChar(128)
+  /// Scoped per user — two different users may use the same key
+  userId        String            @map("user_id") @db.VarChar(255)
+  /// The API endpoint this key was used on
+  endpoint      String            @db.VarChar(255)
+  /// SHA-256 hash of the request body — detects key reuse with different body
+  requestHash   String            @map("request_hash") @db.Char(64)
+  status        IdempotencyStatus @default(PROCESSING)
+  /// HTTP status code of the original response
+  responseStatus Int?             @map("response_status")
+  /// Full response body stored for replay on duplicate requests
+  responseBody  Json?             @map("response_body") @db.JsonB
+  /// The transaction ID created by this request (for cross-referencing)
+  transactionId String?           @map("transaction_id") @db.Uuid
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz()
+  expiresAt     DateTime          @map("expires_at") @db.Timestamptz()
+
+  /// Uniqueness: one key per user (keys are not globally unique)
+  @@unique([key, userId])
+  @@index([expiresAt])
+  @@index([status])
+  @@map("idempotency_keys")
+}
+
+// =============================================================================
+// TRANSACTIONS — High-level record of each financial event
+// =============================================================================
+
+/// Top-level record for each financial transaction.
+///
+/// A Transaction is the business-level event (e.g., "P2P transfer of INR 5,000
+/// from User A to User B"). It may produce multiple LedgerEntries (the journal
+/// lines). The Transaction tracks the lifecycle state machine and links to all
+/// its journal entries via referenceId on LedgerEntry.
+model Transaction {
+  id              String            @id @default(uuid()) @db.Uuid
+  type            TransactionType
+  status          TransactionStatus @default(INITIATED)
+  /// Total amount in the transaction's primary currency
+  amount          Decimal           @db.Decimal(19, 4)
+  currency        String            @db.Char(3)
+  /// The user or system actor initiating this transaction
+  initiatedBy     String            @map("initiated_by") @db.VarChar(255)
+  idempotencyKey  String?           @map("idempotency_key") @db.VarChar(128)
+  /// If this is a reversal, points to the original transaction
+  originalId      String?           @map("original_id") @db.Uuid
+  original        Transaction?      @relation("TransactionReversal", fields: [originalId], references: [id])
+  reversals       Transaction[]     @relation("TransactionReversal")
+  /// FX snapshot used if this transaction involved currency conversion
+  exchangeRateId  String?           @map("exchange_rate_id") @db.Uuid
+  /// Reason for failure or rejection
+  failureReason   String?           @map("failure_reason") @db.Text
+  /// Extensible: LRS quota, merchant ID, loan account ID, etc.
+  metadata        Json?             @db.JsonB
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt       DateTime          @updatedAt @map("updated_at") @db.Timestamptz()
+  postedAt        DateTime?         @map("posted_at") @db.Timestamptz()
+
+  @@index([type])
+  @@index([status])
+  @@index([initiatedBy])
+  @@index([originalId])
+  @@index([createdAt])
+  @@map("transactions")
+}
+
+// =============================================================================
+// TRANSACTION LIMITS — Per-account/per-type limits
+// =============================================================================
+
+/// Configurable limits per account and transaction type.
+///
+/// Checked BEFORE processing — if a transaction would exceed any active limit,
+/// it is rejected with HTTP 422 (Business Rule Violation).
+model TransactionLimit {
+  id              String          @id @default(uuid()) @db.Uuid
+  accountId       String          @map("account_id") @db.Uuid
+  account         Account         @relation(fields: [accountId], references: [id])
+  transactionType TransactionType @map("transaction_type")
+  /// Maximum single transaction amount (NULL = no limit)
+  maxPerTx        Decimal?        @map("max_per_tx") @db.Decimal(19, 4)
+  /// Maximum daily total amount (NULL = no limit)
+  maxPerDay       Decimal?        @map("max_per_day") @db.Decimal(19, 4)
+  /// Maximum monthly total amount (NULL = no limit)
+  maxPerMonth     Decimal?        @map("max_per_month") @db.Decimal(19, 4)
+  currency        String          @db.Char(3)
+  isActive        Boolean         @default(true) @map("is_active")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz()
+
+  @@unique([accountId, transactionType])
+  @@index([accountId])
+  @@map("transaction_limits")
+}
+
+// =============================================================================
+// REVERSALS — Tracks all reversal and refund operations
+// =============================================================================
+
+/// Records a reversal or refund against an original transaction.
+///
+/// No-mutation principle: reversals never modify the original transaction
+/// or its ledger entries. Instead, new corrective journal entries are created
+/// that economically negate the original.
+///
+/// Idempotency: UNIQUE on (originalTransactionId, idempotencyKey) prevents
+/// duplicate reversals on network retries.
+model Reversal {
+  id                    String          @id @default(uuid()) @db.Uuid
+  originalTransactionId String          @map("original_transaction_id") @db.Uuid
+  reversalTransactionId String          @map("reversal_transaction_id") @db.Uuid
+  /// Amount reversed (may be less than original for partial refunds)
+  amount                Decimal         @db.Decimal(19, 4)
+  currency              String          @db.Char(3)
+  feePolicy             RefundFeePolicy @map("fee_policy")
+  /// Amount of fee reversed (0 for NONE policy)
+  feeAmountReversed     Decimal         @default(0) @map("fee_amount_reversed") @db.Decimal(19, 4)
+  reason                String          @db.Text
+  initiatedBy           String          @map("initiated_by") @db.VarChar(255)
+  idempotencyKey        String          @map("idempotency_key") @db.VarChar(128)
+  createdAt             DateTime        @default(now()) @map("created_at") @db.Timestamptz()
+
+  /// Prevents duplicate reversals on retry
+  @@unique([originalTransactionId, idempotencyKey])
+  @@index([originalTransactionId])
+  @@index([reversalTransactionId])
+  @@map("reversals")
+}
+
+// =============================================================================
+// AUDIT EVENTS — System-level audit log (separate from ledger hash chain)
+// =============================================================================
+
+/// Append-only log of system-level events for compliance and security auditing.
+///
+/// This is separate from the ledger hash chain. The hash chain proves ledger
+/// integrity. The audit_events table records WHO did WHAT and WHEN at the
+/// application level — logins, configuration changes, admin actions, etc.
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  /// The actor performing the action (user ID, service name, 'SYSTEM')
+  actor       String   @db.VarChar(255)
+  /// Action performed: 'TRANSACTION_POSTED', 'ACCOUNT_CLOSED', 'RATE_INGESTED', etc.
+  action      String   @db.VarChar(100)
+  /// Entity type affected: 'ACCOUNT', 'LEDGER_ENTRY', 'TRANSACTION', etc.
+  entityType  String   @map("entity_type") @db.VarChar(100)
+  entityId    String   @map("entity_id") @db.Uuid
+  /// Full state snapshot before the action (for change detection)
+  before      Json?    @db.JsonB
+  /// Full state snapshot after the action
+  after       Json?    @db.JsonB
+  ipAddress   String?  @map("ip_address") @db.VarChar(45)
+  userAgent   String?  @map("user_agent") @db.Text
+  requestId   String?  @map("request_id") @db.VarChar(128)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz()
+
+  @@index([actor])
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
