@@ -35,6 +35,7 @@
     "partitions:manage": "ts-node -r tsconfig-paths/register scripts/manage-partitions.ts"
   },
   "dependencies": {
+    "@fastify/static": "^7.0.4",
     "@nestjs/common": "^10.0.0",
     "@nestjs/config": "^3.0.0",
     "@nestjs/core": "^10.0.0",

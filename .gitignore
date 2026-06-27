@@ -4,6 +4,7 @@ node_modules/
 # Build output
 dist/
 build/
+docs/arch.md
 
 # Environment — NEVER commit this
 .env
