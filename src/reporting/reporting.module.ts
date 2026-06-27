@@ -1,11 +1,27 @@
 // src/reporting/reporting.module.ts
 import { Module } from '@nestjs/common';
 import { TrialBalanceService } from './trial-balance.service';
+import { AccountStatementService } from './account-statement.service';
+import { IncomeStatementService } from './income-statement.service';
+import { BalanceSheetService } from './balance-sheet.service';
+import { FxExposureService } from './fx-exposure.service';
 import { ReportingController } from './reporting.controller';
 
 @Module({
   controllers: [ReportingController],
-  providers: [TrialBalanceService],
-  exports: [TrialBalanceService],
+  providers: [
+    TrialBalanceService,
+    AccountStatementService,
+    IncomeStatementService,
+    BalanceSheetService,
+    FxExposureService,
+  ],
+  exports: [
+    TrialBalanceService,
+    AccountStatementService,
+    IncomeStatementService,
+    BalanceSheetService,
+    FxExposureService,
+  ],
 })
 export class ReportingModule {}
