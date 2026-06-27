@@ -10,9 +10,6 @@ import { AccountsModule } from '@accounts/accounts.module';
 import { LedgerModule } from '@ledger/ledger.module';
 import { TransactionsModule } from '@transactions/transactions.module';
 import { ReportingModule } from '@reporting/reporting.module';
-import { FxModule } from '@fx/fx.module';
-import { AuditModule } from '@audit/audit.module';
-import { ReversalsModule } from '@reversals/reversals.module';
 import { GlobalExceptionFilter } from '@common/filters/global-exception.filter';
 import { RequestIdInterceptor } from '@common/interceptors/request-id.interceptor';
 import { ApiKeyGuard } from '@common/guards/api-key.guard';
@@ -67,11 +64,15 @@ import databaseConfig from '@config/database.config';
     LedgerModule,
     TransactionsModule,
     ReportingModule,
-    FxModule,
-    AuditModule,
-    ReversalsModule,
 
     // Feature modules added session by session:
+    // AccountsModule     ← next
+    // LedgerModule
+    // TransactionsModule
+    // FxModule
+    // ReversalsModule
+    // AuditModule
+    // ReportingModule
   ],
   providers: [
     // Global exception filter — structured error responses on every route
