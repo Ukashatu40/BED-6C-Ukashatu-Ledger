@@ -3,7 +3,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import type { AppConfig } from '@config/app.config';
-import Decimal from 'decimal.js'; // Or your specific 'decimal.js' import path
 
 /**
  * The fields that contribute to each entry's hash.
@@ -37,23 +36,6 @@ export interface ChainVerificationResult {
   expectedHash?: string; // what the hash should be
 }
 
-// Interface for unformatted inputs containing raw Decimal or Date types from the DB
-export interface RawLedgerEntry {
-  id: string;
-  journalId: string;
-  accountId: string;
-  entryType: string;
-  amount: { toString(): string } | Decimal | number;
-  currency: string;
-  effectiveDate: Date | string;
-  createdBy: string;
-  referenceType: string;
-  referenceId: string;
-  narrative: string;
-  hash: string;
-  previousHash: string;
-}
-
 @Injectable()
 export class HashChainService {
   private readonly logger = new Logger(HashChainService.name);
@@ -67,6 +49,24 @@ export class HashChainService {
 
   /**
    * Compute the SHA-256 hash for a new ledger entry.
+   *
+   * Hash input = SHA256(
+   *   entry.id
+   *   + entry.journalId
+   *   + entry.accountId
+   *   + entry.entryType
+   *   + entry.amount          ← NUMERIC string, e.g. "5000.0000"
+   *   + entry.currency
+   *   + entry.effectiveDate   ← ISO 8601 UTC
+   *   + entry.createdBy
+   *   + entry.referenceType
+   *   + entry.referenceId
+   *   + entry.narrative
+   *   + previousHash          ← hash of the immediately preceding entry
+   * )
+   *
+   * The inclusion of previousHash is what creates the chain —
+   * every entry's hash depends on all entries before it.
    */
   computeHash(entry: HashableEntry, previousHash: string): HashChainResult {
     const input = [
@@ -91,6 +91,8 @@ export class HashChainService {
 
   /**
    * Get the genesis hash — the previousHash for the very first entry.
+   * Using a known constant (all zeros) makes the genesis detectable
+   * and the chain verifiable from the start.
    */
   getGenesisHash(): string {
     return this.genesisHash;
@@ -99,36 +101,21 @@ export class HashChainService {
   /**
    * Verify the integrity of a sequence of ledger entries.
    * Traverses every entry in insertion order and recomputes each hash.
+   * If any entry has been tampered with, the hash won't match and
+   * the method reports exactly where the chain breaks.
    *
-   * @param entries - Raw, unsanitized ledger records directly from the database layer
+   * @param entries - Must be sorted by postedAt ASC (insertion order)
    */
-  verifyChain(entries: RawLedgerEntry[]): ChainVerificationResult {
+  verifyChain(
+    entries: Array<HashableEntry & { hash: string; previousHash: string }>,
+  ): ChainVerificationResult {
     if (entries.length === 0) {
       return { valid: true, totalEntries: 0 };
     }
 
-    // Transform raw DB values into standard strings to fix string representation issues
-    const hashableEntries = entries.map((e: RawLedgerEntry) => ({
-      id: e.id,
-      journalId: e.journalId,
-      accountId: e.accountId,
-      entryType: e.entryType,
-      // CRITICAL: always toFixed(4) — Prisma Decimal.toString() omits trailing zeros
-      amount: new Decimal(e.amount.toString()).toFixed(4),
-      currency: e.currency,
-      effectiveDate:
-        typeof e.effectiveDate === 'string' ? e.effectiveDate : e.effectiveDate.toISOString(),
-      createdBy: e.createdBy,
-      referenceType: e.referenceType,
-      referenceId: e.referenceId,
-      narrative: e.narrative,
-      hash: e.hash,
-      previousHash: e.previousHash,
-    }));
-
     let expectedPreviousHash = this.genesisHash;
 
-    for (const entry of hashableEntries) {
+    for (const entry of entries) {
       // Verify the stored previousHash matches what we expect
       if (entry.previousHash !== expectedPreviousHash) {
         this.logger.warn(
@@ -138,7 +125,7 @@ export class HashChainService {
         );
         return {
           valid: false,
-          totalEntries: hashableEntries.length,
+          totalEntries: entries.length,
           firstBreakAt: entry.id,
           brokenHash: entry.previousHash,
           expectedHash: expectedPreviousHash,
@@ -169,7 +156,7 @@ export class HashChainService {
         );
         return {
           valid: false,
-          totalEntries: hashableEntries.length,
+          totalEntries: entries.length,
           firstBreakAt: entry.id,
           brokenHash: entry.hash,
           expectedHash: recomputed,
@@ -180,7 +167,7 @@ export class HashChainService {
       expectedPreviousHash = entry.hash;
     }
 
-    this.logger.log(`Hash chain verified: ${hashableEntries.length.toString()} entries, all valid`);
-    return { valid: true, totalEntries: hashableEntries.length };
+    this.logger.log(`Hash chain verified: ${entries.length.toString()} entries, all valid`);
+    return { valid: true, totalEntries: entries.length };
   }
 }

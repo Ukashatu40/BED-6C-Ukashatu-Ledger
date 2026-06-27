@@ -128,13 +128,6 @@ export class LedgerService {
           previousHash,
         );
 
-        this.logger.debug(
-          `Hash input for entry ${entryId}: ` +
-            `${entryId}|${journalId}|${line.accountId}|${line.entryType}|` +
-            `${amountStr}|${line.currency}|${effectiveDate.toISOString()}|` +
-            `${createdBy}|${dto.referenceType}|${dto.referenceId}|${line.narrative}|${previousHash}`,
-        );
-
         const insertData: Parameters<typeof this.repo.insertEntry>[1] = {
           id: entryId,
           journalId,

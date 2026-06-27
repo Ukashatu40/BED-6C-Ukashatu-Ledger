@@ -4,7 +4,6 @@ import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv'; // 1. Import dotenv
 import { seedChartOfAccounts } from './chart-of-accounts.seed';
-import { seedExchangeRates } from './exchange-rates.seed';
 
 dotenv.config();
 
@@ -23,8 +22,6 @@ async function main(): Promise<void> {
 
   // Seeds run in dependency order
   await seedChartOfAccounts(prisma);
-
-  await seedExchangeRates(prisma);
 
   console.log('\n✅ Seed complete.\n');
 }
