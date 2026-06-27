@@ -3,6 +3,8 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import type { DatabaseConfig } from '@config/database.config';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -44,14 +46,15 @@ export class DatabaseService extends PrismaClient implements OnModuleInit, OnMod
   constructor(configService: ConfigService) {
     const dbConfig = configService.get<DatabaseConfig>('database');
 
+    const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+    const adapter = new PrismaPg(pool);
+
     if (!dbConfig) {
       throw new Error('Database configuration is missing');
     }
 
     super({
-      datasources: {
-        db: { url: dbConfig.url },
-      },
+      adapter,
       log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
     });
   }
