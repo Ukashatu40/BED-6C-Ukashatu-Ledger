@@ -18,9 +18,9 @@
     "lint": "eslint \"{src,seeds,scripts,tests}/**/*.ts\"",
     "lint:fix": "eslint \"{src,seeds,scripts,tests}/**/*.ts\" --fix",
     "test": "jest",
-    "test:watch": "jest --watch",
-    "test:unit": "jest --testPathPattern=tests/unit",
-    "test:integration": "jest --testPathPattern=tests/integration --runInBand",
+    "test:watch": "jest --selectProjects unit --watch",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration --runInBand",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "db:generate": "prisma generate",
@@ -80,35 +80,5 @@
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.1.3",
     "typescript-eslint": "^8.0.0"
-  },
-  "jest": {
-    "moduleFileExtensions": [
-      "js",
-      "json",
-      "ts"
-    ],
-    "rootDir": ".",
-    "testRegex": ".*\\.spec\\.ts$",
-    "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
-    },
-    "collectCoverageFrom": [
-      "src/**/*.(t|j)s"
-    ],
-    "coverageDirectory": "./docs/coverage",
-    "testEnvironment": "node",
-    "moduleNameMapper": {
-      "^@config/(.*)$": "<rootDir>/src/config/$1",
-      "^@common/(.*)$": "<rootDir>/src/common/$1",
-      "^@database/(.*)$": "<rootDir>/src/database/$1",
-      "^@accounts/(.*)$": "<rootDir>/src/accounts/$1",
-      "^@ledger/(.*)$": "<rootDir>/src/ledger/$1",
-      "^@transactions/(.*)$": "<rootDir>/src/transactions/$1",
-      "^@fx/(.*)$": "<rootDir>/src/fx/$1",
-      "^@reversals/(.*)$": "<rootDir>/src/reversals/$1",
-      "^@audit/(.*)$": "<rootDir>/src/audit/$1",
-      "^@reporting/(.*)$": "<rootDir>/src/reporting/$1",
-      "^@health/(.*)$": "<rootDir>/src/health/$1"
-    }
   }
 }
