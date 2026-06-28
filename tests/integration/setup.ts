@@ -1,11 +1,13 @@
-// tests/integration/setup.ts
+import * as dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 
-const prisma = new PrismaClient({
-  datasources: {
-    db: { url: process.env['TEST_DATABASE_URL'] },
-  },
-});
+dotenv.config();
+const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
+const adapter = new PrismaPg(pool);
+
+const prisma = new PrismaClient({ adapter });
 
 /**
  * Wipe all transactional data between tests.

@@ -1,5 +1,6 @@
 // src/ledger/balance.service.ts
 import { Injectable } from '@nestjs/common';
+import { PrismaClient } from '@prisma/client';
 import { DatabaseService, type TransactionClient } from '@database/database.service';
 import { toDecimal } from '@common/types/money.type';
 import Decimal from 'decimal.js';
@@ -7,7 +8,7 @@ import Decimal from 'decimal.js';
 export interface AccountBalance {
   accountId: string;
   currency: string;
-  balance: string; // NUMERIC string — always 4dp
+  balance: string;
   computedAt: string;
 }
 
@@ -21,24 +22,9 @@ interface BalanceRow {
 export class BalanceService {
   constructor(private readonly db: DatabaseService) {}
 
-  /**
-   * Derive the current balance for an account by summing all posted entries.
-   *
-   * balance = SUM(amount WHERE entry_type = 'DEBIT')
-   *         - SUM(amount WHERE entry_type = 'CREDIT')
-   *
-   * This is the AUTHORITATIVE balance. Never use balance_snapshots for
-   * write decisions — always re-derive inside a locked transaction.
-   *
-   * The sign gives a raw debit-minus-credit value. Whether this is positive
-   * or negative for a "healthy" account depends on the account type:
-   *   - Asset/Expense: positive raw balance = money in the account (normal)
-   *   - Liability/Equity/Revenue: negative raw balance = money in the account (normal)
-   *
-   * For display purposes, callers apply normalBalanceSign() from money.type.ts.
-   */
   async deriveBalance(accountId: string, tx?: TransactionClient): Promise<AccountBalance> {
-    const client = (tx as DatabaseService | undefined) ?? this.db;
+    // Cast to PrismaClient to access $queryRaw and model accessors
+    const client = (tx ?? this.db) as PrismaClient;
 
     const rows = await client.$queryRaw<BalanceRow[]>`
       SELECT
@@ -56,8 +42,7 @@ export class BalanceService {
     `;
 
     if (rows.length === 0) {
-      // Account exists but has no entries — balance is zero
-      const account = await this.db.account.findUnique({
+      const account = await (this.db as PrismaClient).account.findUnique({
         where: { id: accountId },
         select: { currency: true },
       });
@@ -79,36 +64,16 @@ export class BalanceService {
     };
   }
 
-  /**
-   * Derive balance INSIDE a locked transaction.
-   * This is the version called before every debit to prevent double-spend.
-   *
-   * Flow:
-   *   1. Acquire advisory lock on accountId
-   *   2. Call this method to get the current balance
-   *   3. Validate sufficient funds
-   *   4. Insert the debit entry
-   *   5. Commit (lock released automatically)
-   */
   async deriveBalanceLocked(tx: TransactionClient, accountId: string): Promise<Decimal> {
     const result = await this.deriveBalance(accountId, tx);
     return toDecimal(result.balance);
   }
 
-  /**
-   * Update the balance snapshot after a journal entry is committed.
-   * Called at the end of every successful withTransaction block.
-   *
-   * The snapshot is a read-optimised cache only — it is never the
-   * source of truth for write decisions.
-   */
-  async updateSnapshot(
-    accountId: string,
-    triggeredBy: string, // ledger entry ID that triggered this update
-  ): Promise<void> {
+  async updateSnapshot(accountId: string, triggeredBy: string): Promise<void> {
     const { balance, currency } = await this.deriveBalance(accountId);
+    const prisma = this.db as PrismaClient;
 
-    await this.db.balanceSnapshot.create({
+    await prisma.balanceSnapshot.create({
       data: {
         accountId,
         balance,
@@ -119,12 +84,9 @@ export class BalanceService {
     });
   }
 
-  /**
-   * Get the latest balance snapshot for fast reads.
-   * Used by the account statement and balance endpoints.
-   */
   async getLatestSnapshot(accountId: string): Promise<AccountBalance | null> {
-    const snapshot = await this.db.balanceSnapshot.findFirst({
+    const prisma = this.db as PrismaClient;
+    const snapshot = await prisma.balanceSnapshot.findFirst({
       where: { accountId },
       orderBy: { snapshotAt: 'desc' },
     });

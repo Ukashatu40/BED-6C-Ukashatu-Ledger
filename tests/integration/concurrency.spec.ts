@@ -2,6 +2,7 @@
 import { Test, type TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
+import { PrismaClient, type LedgerEntry } from '@prisma/client';
 import { DatabaseModule } from '@database/database.module';
 import { LedgerModule } from '@ledger/ledger.module';
 import { LedgerService } from '@ledger/ledger.service';
@@ -34,8 +35,9 @@ describe('Concurrency — double-spend prevention (integration)', () => {
     ledger = app.get(LedgerService);
     db = app.get(DatabaseService);
 
-    const wallet = await db.account.findUnique({ where: { code: '1001' } });
-    const liability = await db.account.findUnique({ where: { code: '2001' } });
+    const prisma = db as unknown as PrismaClient;
+    const wallet = await prisma.account.findUnique({ where: { code: '1001' } });
+    const liability = await prisma.account.findUnique({ where: { code: '2001' } });
 
     if (!wallet || !liability) throw new Error('Seed accounts missing');
     walletId = wallet.id;
@@ -177,14 +179,18 @@ describe('Concurrency — double-spend prevention (integration)', () => {
     await Promise.allSettled(deposits);
 
     // Check trial balance
-    const entries = await db.ledgerEntry.findMany({ where: { status: 'POSTED' } });
-    const totalDebits = entries
-      .filter((e) => e.entryType === 'DEBIT')
-      .reduce((sum, e) => sum + parseFloat(e.amount.toString()), 0);
-    const totalCredits = entries
-      .filter((e) => e.entryType === 'CREDIT')
-      .reduce((sum, e) => sum + parseFloat(e.amount.toString()), 0);
+    const prisma2 = db as unknown as PrismaClient;
 
+    const entries: LedgerEntry[] = await prisma2.ledgerEntry.findMany({
+      where: { status: 'POSTED' },
+    });
+    const totalDebits = entries
+      .filter((e: LedgerEntry) => e.entryType === 'DEBIT')
+      .reduce((sum: number, e: LedgerEntry) => sum + parseFloat(e.amount.toString()), 0);
+
+    const totalCredits = entries
+      .filter((e: LedgerEntry) => e.entryType === 'CREDIT')
+      .reduce((sum: number, e: LedgerEntry) => sum + parseFloat(e.amount.toString()), 0);
     expect(totalDebits).toBe(totalCredits);
   });
 });

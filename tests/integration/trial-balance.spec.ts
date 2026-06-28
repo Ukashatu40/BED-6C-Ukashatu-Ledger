@@ -4,9 +4,11 @@ import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
 import { DatabaseModule } from '@database/database.module';
 import { LedgerModule } from '@ledger/ledger.module';
+import { ReportingModule } from '@reporting/reporting.module';
 import { LedgerService } from '@ledger/ledger.service';
 import { TrialBalanceService } from '@reporting/trial-balance.service';
 import { DatabaseService } from '@database/database.service';
+import { PrismaClient } from '@prisma/client';
 import { cleanDatabase } from './setup';
 import appConfig from '@config/app.config';
 import databaseConfig from '@config/database.config';
@@ -31,19 +33,18 @@ describe('TrialBalanceService (integration)', () => {
         LoggerModule.forRoot({ pinoHttp: { level: 'silent' } }),
         DatabaseModule,
         LedgerModule,
-        // Provide TrialBalanceService directly since we're not importing ReportingModule
-        { provide: TrialBalanceService, useClass: TrialBalanceService },
+        ReportingModule, // ← import the whole module, don't manually provide
       ],
-      providers: [TrialBalanceService],
     }).compile();
 
     ledger = app.get(LedgerService);
     trialBalance = app.get(TrialBalanceService);
     db = app.get(DatabaseService);
 
-    const wallet = await db.account.findUnique({ where: { code: '1001' } });
-    const liability = await db.account.findUnique({ where: { code: '2001' } });
-    const feeRevenue = await db.account.findUnique({ where: { code: '4001' } });
+    const prisma = db as unknown as PrismaClient;
+    const wallet = await prisma.account.findUnique({ where: { code: '1001' } });
+    const liability = await prisma.account.findUnique({ where: { code: '2001' } });
+    const feeRevenue = await prisma.account.findUnique({ where: { code: '4001' } });
 
     if (!wallet || !liability || !feeRevenue) {
       throw new Error('Seed accounts missing');

@@ -9,6 +9,7 @@ import { DatabaseService } from '@database/database.service';
 import { cleanDatabase } from './setup';
 import appConfig from '@config/app.config';
 import databaseConfig from '@config/database.config';
+import { PrismaClient } from '@prisma/client'; // Added PrismaClient import
 
 describe('LedgerService (integration)', () => {
   let app: TestingModule;
@@ -18,7 +19,6 @@ describe('LedgerService (integration)', () => {
   // Real account IDs seeded in the test database
   let walletAccountId: string;
   let liabilityAccountId: string;
-  let feeRevenueAccountId: string;
 
   beforeAll(async () => {
     app = await Test.createTestingModule({
@@ -37,18 +37,17 @@ describe('LedgerService (integration)', () => {
     ledger = app.get(LedgerService);
     db = app.get(DatabaseService);
 
-    // Resolve real account IDs from the seeded Chart of Accounts
-    const wallet = await db.account.findUnique({ where: { code: '1001' } });
-    const liability = await db.account.findUnique({ where: { code: '2001' } });
-    const feeRevenue = await db.account.findUnique({ where: { code: '4001' } });
+    // Replaced db.account calls with explicit PrismaClient casting
+    const prisma = db as unknown as PrismaClient;
+    const wallet = await prisma.account.findUnique({ where: { code: '1001' } });
+    const liability = await prisma.account.findUnique({ where: { code: '2001' } });
 
-    if (!wallet || !liability || !feeRevenue) {
+    if (!wallet || !liability) {
       throw new Error('Required seed accounts not found — run npm run db:seed first');
     }
 
     walletAccountId = wallet.id;
     liabilityAccountId = liability.id;
-    feeRevenueAccountId = feeRevenue.id;
   });
 
   beforeEach(async () => {
@@ -112,7 +111,7 @@ describe('LedgerService (integration)', () => {
               {
                 accountId: liabilityAccountId,
                 entryType: 'CREDIT',
-                amount: '9999.0000', // ← off by 1
+                amount: '9999.0000',
                 currency: 'INR',
                 narrative: 'Unbalanced credit',
               },
@@ -187,8 +186,9 @@ describe('LedgerService (integration)', () => {
         );
       }
 
-      // Verify all 6 entries (3 journals × 2 lines) form a valid chain
-      const entries = await db.ledgerEntry.findMany({
+      // Replaced db.ledgerEntry.findMany with explicit PrismaClient casting
+      const prisma2 = db as unknown as PrismaClient;
+      const entries = await prisma2.ledgerEntry.findMany({
         where: { status: 'POSTED' },
         orderBy: [{ postedAt: 'asc' }, { id: 'asc' }],
       });
