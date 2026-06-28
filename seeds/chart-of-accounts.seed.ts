@@ -1,5 +1,7 @@
 // seeds/chart-of-accounts.seed.ts
 import type { Prisma, PrismaClient } from '@prisma/client';
+import * as dotenv from 'dotenv';
+dotenv.config();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart of Accounts Definition
