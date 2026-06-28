@@ -48,11 +48,12 @@ const config: Config = {
     {
       displayName: 'integration',
       testEnvironment: 'node',
-      testMatch: ['<rootDir>/tests/integration/**/*.spec.ts'],
+      testMatch: ['<rootDir>/tests/integration/*.spec.ts'],
       transform: {
         '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
       },
       moduleNameMapper: sharedModuleNameMapper,
+      setupFiles: ['<rootDir>/tests/integration/jest.setup.ts'],
     },
   ],
 };

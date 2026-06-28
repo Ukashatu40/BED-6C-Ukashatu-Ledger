@@ -1,26 +1,48 @@
+// tests/integration/setup.ts
+import * as path from 'path';
 import * as dotenv from 'dotenv';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
+// Explicitly use TEST_DATABASE_URL — set by jest.setup.ts before tests run
 
-dotenv.config();
-const pool = new Pool({ connectionString: process.env.TEST_DATABASE_URL });
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
+// 2. Select the isolated integration test database URL, with a safe fallback string
+const rawUrl = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || '';
+const cleanDbUrl = rawUrl.replace(/(^["']|["']$)/g, '').trim();
+
+if (!cleanDbUrl) {
+  console.error('❌ Integration Setup Error: No database URL found in environment variables.');
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: cleanDbUrl,
+  max: 5, // Keep the connection pool small for integration tests
+});
 const adapter = new PrismaPg(pool);
 
+// 4. Instantiate Prisma using the driver adapter configuration
 const prisma = new PrismaClient({ adapter });
 
 /**
  * Wipe all transactional data between tests.
- * Accounts and exchange rates are preserved (they are reference data).
- * Deletion order respects foreign key constraints.
+ * Uses TRUNCATE CASCADE for speed and to handle FK constraints in one shot.
+ * Reference data (accounts, exchange_rate_snapshots) is preserved.
  */
 export async function cleanDatabase(): Promise<void> {
-  await prisma.$executeRaw`DELETE FROM balance_snapshots`;
-  await prisma.$executeRaw`DELETE FROM idempotency_keys`;
-  await prisma.$executeRaw`DELETE FROM reversals`;
-  await prisma.$executeRaw`DELETE FROM audit_events`;
-  await prisma.$executeRaw`DELETE FROM ledger_entries`;
-  await prisma.$executeRaw`DELETE FROM transactions`;
+  // TRUNCATE CASCADE handles FK order automatically
+  await prisma.$executeRawUnsafe(`
+    TRUNCATE TABLE
+      balance_snapshots,
+      idempotency_keys,
+      reversals,
+      audit_events,
+      ledger_entries,
+      transactions
+    RESTART IDENTITY CASCADE
+  `);
 }
 
 export async function closePrisma(): Promise<void> {

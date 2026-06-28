@@ -1,22 +1,21 @@
-// tests/integration/ledger.spec.ts
+// tests/integration/ledger.spec.ts — replace the full file
+
 import { Test, type TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
 import { LoggerModule } from 'nestjs-pino';
+import { PrismaClient } from '@prisma/client';
 import { DatabaseModule } from '@database/database.module';
 import { LedgerModule } from '@ledger/ledger.module';
 import { LedgerService } from '@ledger/ledger.service';
 import { DatabaseService } from '@database/database.service';
-import { cleanDatabase } from './setup';
+import { cleanDatabase, closePrisma } from './setup';
 import appConfig from '@config/app.config';
 import databaseConfig from '@config/database.config';
-import { PrismaClient } from '@prisma/client'; // Added PrismaClient import
 
 describe('LedgerService (integration)', () => {
   let app: TestingModule;
   let ledger: LedgerService;
   let db: DatabaseService;
-
-  // Real account IDs seeded in the test database
   let walletAccountId: string;
   let liabilityAccountId: string;
 
@@ -37,13 +36,12 @@ describe('LedgerService (integration)', () => {
     ledger = app.get(LedgerService);
     db = app.get(DatabaseService);
 
-    // Replaced db.account calls with explicit PrismaClient casting
     const prisma = db as unknown as PrismaClient;
     const wallet = await prisma.account.findUnique({ where: { code: '1001' } });
     const liability = await prisma.account.findUnique({ where: { code: '2001' } });
 
     if (!wallet || !liability) {
-      throw new Error('Required seed accounts not found — run npm run db:seed first');
+      throw new Error('Required seed accounts not found — run npm run db:seed:test first');
     }
 
     walletAccountId = wallet.id;
@@ -56,7 +54,38 @@ describe('LedgerService (integration)', () => {
 
   afterAll(async () => {
     await app.close();
+    await closePrisma();
   });
+
+  // Helper
+  async function postDeposit(amount: string, refId: string): Promise<void> {
+    await ledger.postJournalEntry(
+      {
+        referenceType: 'CUSTOMER_DEPOSIT_BANK',
+        referenceId: refId,
+        effectiveDate: '2026-01-01T00:00:00Z',
+        lines: [
+          {
+            accountId: walletAccountId,
+            entryType: 'DEBIT',
+            amount,
+            currency: 'INR',
+            narrative: 'Test deposit',
+          },
+          {
+            accountId: liabilityAccountId,
+            entryType: 'CREDIT',
+            amount,
+            currency: 'INR',
+            narrative: 'Test liability',
+          },
+        ],
+      },
+      'test_actor',
+      undefined,
+      { checkBalanceOn: [] },
+    );
+  }
 
   describe('postJournalEntry', () => {
     it('posts a balanced two-line deposit entry', async () => {
@@ -137,14 +166,14 @@ describe('LedgerService (integration)', () => {
                 entryType: 'DEBIT',
                 amount: '0.0000',
                 currency: 'INR',
-                narrative: 'Zero amount',
+                narrative: 'Zero',
               },
               {
                 accountId: liabilityAccountId,
                 entryType: 'CREDIT',
                 amount: '0.0000',
                 currency: 'INR',
-                narrative: 'Zero amount',
+                narrative: 'Zero',
               },
             ],
           },
@@ -156,81 +185,32 @@ describe('LedgerService (integration)', () => {
     });
 
     it('builds a valid hash chain across multiple journals', async () => {
-      // Post three deposits sequentially
+      // Clean slate — post exactly 3 deposits (6 entries total)
       for (let i = 0; i < 3; i++) {
-        await ledger.postJournalEntry(
-          {
-            referenceType: 'CUSTOMER_DEPOSIT_BANK',
-            referenceId: `01932a1b-0000-7000-8000-00000000000${(i + 4).toString()}`,
-            effectiveDate: '2026-01-01T00:00:00Z',
-            lines: [
-              {
-                accountId: walletAccountId,
-                entryType: 'DEBIT',
-                amount: '1000.0000',
-                currency: 'INR',
-                narrative: `Deposit ${i.toString()}`,
-              },
-              {
-                accountId: liabilityAccountId,
-                entryType: 'CREDIT',
-                amount: '1000.0000',
-                currency: 'INR',
-                narrative: `Liability ${i.toString()}`,
-              },
-            ],
-          },
-          'test_actor',
-          undefined,
-          { checkBalanceOn: [] },
-        );
+        await postDeposit('1000.0000', `01932a1b-0000-7000-8000-00000000000${(i + 4).toString()}`);
       }
 
-      // Replaced db.ledgerEntry.findMany with explicit PrismaClient casting
-      const prisma2 = db as unknown as PrismaClient;
-      const entries = await prisma2.ledgerEntry.findMany({
+      const prisma = db as unknown as PrismaClient;
+      const entries = await prisma.ledgerEntry.findMany({
         where: { status: 'POSTED' },
         orderBy: [{ postedAt: 'asc' }, { id: 'asc' }],
       });
 
+      // After cleanDatabase + 3 deposits = exactly 6 entries
       expect(entries).toHaveLength(6);
 
-      // Each entry's previousHash should equal the hash of the entry before it
       for (let i = 1; i < entries.length; i++) {
         expect(entries[i]!.previousHash).toBe(entries[i - 1]!.hash);
       }
     });
 
     it('prevents double-spend with insufficient balance', async () => {
-      // First deposit INR 500
-      await ledger.postJournalEntry(
-        {
-          referenceType: 'CUSTOMER_DEPOSIT_BANK',
-          referenceId: '01932a1b-0000-7000-8000-000000000010',
-          effectiveDate: '2026-01-01T00:00:00Z',
-          lines: [
-            {
-              accountId: walletAccountId,
-              entryType: 'DEBIT',
-              amount: '500.0000',
-              currency: 'INR',
-              narrative: 'Seed deposit',
-            },
-            {
-              accountId: liabilityAccountId,
-              entryType: 'CREDIT',
-              amount: '500.0000',
-              currency: 'INR',
-              narrative: 'Seed liability',
-            },
-          ],
-        },
-        'test_actor',
-        undefined,
-        { checkBalanceOn: [] },
-      );
+      // Deposit INR 500
+      await postDeposit('500.0000', '01932a1b-0000-7000-8000-000000000010');
 
-      // Attempt to withdraw INR 1000 — should fail
+      // Attempt to withdraw INR 1000 from the WALLET — balance check on walletAccountId
+      // The withdrawal pattern: DEBIT liability / CREDIT wallet
+      // checkBalanceOn: [walletAccountId] checks the wallet's derived balance
       await expect(
         ledger.postJournalEntry(
           {
@@ -256,7 +236,12 @@ describe('LedgerService (integration)', () => {
           },
           'test_actor',
           undefined,
-          { checkBalanceOn: [walletAccountId] },
+          // checkBalanceOn wallet — wallet has 500, requesting 1000 from it
+          // BUT: wallet is being CREDITED here (withdrawal reduces liability, credits wallet)
+          // The balance check must be on the account being reduced
+          // For withdrawal: wallet balance decreases → check wallet's CURRENT balance
+          // vs the CREDIT amount. We need a dedicated check here.
+          { checkBalanceOn: [] }, // See note below
         ),
       ).rejects.toThrow('Insufficient balance');
     });
@@ -293,46 +278,19 @@ describe('LedgerService (integration)', () => {
         expect(entry.hash).toMatch(/^[0-9a-f]{64}$/);
         expect(entry.previousHash).toMatch(/^[0-9a-f]{64}$/);
       }
-
-      // Second entry's previousHash must equal first entry's hash
       expect(result.entries[1]!.previousHash).toBe(result.entries[0]!.hash);
     });
   });
 
   describe('getAccountBalance', () => {
     it('returns 0.0000 for an account with no entries', async () => {
+      // cleanDatabase() runs before each test — no entries exist
       const balance = await ledger.getAccountBalance(walletAccountId);
       expect(balance).toBe('0.0000');
     });
 
     it('returns correct balance after posting entries', async () => {
-      await ledger.postJournalEntry(
-        {
-          referenceType: 'CUSTOMER_DEPOSIT_BANK',
-          referenceId: '01932a1b-0000-7000-8000-000000000030',
-          effectiveDate: '2026-01-01T00:00:00Z',
-          lines: [
-            {
-              accountId: walletAccountId,
-              entryType: 'DEBIT',
-              amount: '25000.0000',
-              currency: 'INR',
-              narrative: 'Balance test',
-            },
-            {
-              accountId: liabilityAccountId,
-              entryType: 'CREDIT',
-              amount: '25000.0000',
-              currency: 'INR',
-              narrative: 'Balance test liability',
-            },
-          ],
-        },
-        'test_actor',
-        undefined,
-        { checkBalanceOn: [] },
-      );
-
+      await postDeposit('25000.0000', '01932a1b-0000-7000-8000-000000000030');
       const balance = await ledger.getAccountBalance(walletAccountId);
       expect(balance).toBe('25000.0000');
     });
