@@ -1,13 +1,29 @@
-//jest.config.ts
+// jest.config.ts
 import type { Config } from 'jest';
 
+const sharedModuleNameMapper = {
+  '^@config/(.*)$': '<rootDir>/src/config/$1',
+  '^@common/(.*)$': '<rootDir>/src/common/$1',
+  '^@database/(.*)$': '<rootDir>/src/database/$1',
+  '^@accounts/(.*)$': '<rootDir>/src/accounts/$1',
+  '^@ledger/(.*)$': '<rootDir>/src/ledger/$1',
+  '^@transactions/(.*)$': '<rootDir>/src/transactions/$1',
+  '^@fx/(.*)$': '<rootDir>/src/fx/$1',
+  '^@reversals/(.*)$': '<rootDir>/src/reversals/$1',
+  '^@audit/(.*)$': '<rootDir>/src/audit/$1',
+  '^@reporting/(.*)$': '<rootDir>/src/reporting/$1',
+  '^@health/(.*)$': '<rootDir>/src/health/$1',
+};
+
 const config: Config = {
-  moduleFileExtensions: ['js', 'json', 'ts'],
   rootDir: '.',
   testEnvironment: 'node',
+  testTimeout: 30_000,
+  moduleFileExtensions: ['js', 'json', 'ts'],
   transform: {
     '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
   },
+  moduleNameMapper: sharedModuleNameMapper,
   collectCoverageFrom: ['src/**/*.(t|j)s', '!src/main.ts'],
   coverageDirectory: './docs/coverage',
   coverageReporters: ['text', 'lcov', 'html'],
@@ -19,68 +35,24 @@ const config: Config = {
       statements: 80,
     },
   },
-  moduleNameMapper: {
-    '^@config/(.*)$': '<rootDir>/src/config/$1',
-    '^@common/(.*)$': '<rootDir>/src/common/$1',
-    '^@database/(.*)$': '<rootDir>/src/database/$1',
-    '^@accounts/(.*)$': '<rootDir>/src/accounts/$1',
-    '^@ledger/(.*)$': '<rootDir>/src/ledger/$1',
-    '^@transactions/(.*)$': '<rootDir>/src/transactions/$1',
-    '^@fx/(.*)$': '<rootDir>/src/fx/$1',
-    '^@reversals/(.*)$': '<rootDir>/src/reversals/$1',
-    '^@audit/(.*)$': '<rootDir>/src/audit/$1',
-    '^@reporting/(.*)$': '<rootDir>/src/reporting/$1',
-    '^@health/(.*)$': '<rootDir>/src/health/$1',
-  },
-  // Separate projects for unit and integration — run independently
   projects: [
     {
       displayName: 'unit',
+      testEnvironment: 'node',
       testMatch: ['<rootDir>/tests/unit/**/*.spec.ts'],
-      moduleNameMapper: {
-        '^@config/(.*)$': '<rootDir>/src/config/$1',
-        '^@common/(.*)$': '<rootDir>/src/common/$1',
-        '^@database/(.*)$': '<rootDir>/src/database/$1',
-        '^@accounts/(.*)$': '<rootDir>/src/accounts/$1',
-        '^@ledger/(.*)$': '<rootDir>/src/ledger/$1',
-        '^@transactions/(.*)$': '<rootDir>/src/transactions/$1',
-        '^@fx/(.*)$': '<rootDir>/src/fx/$1',
-        '^@reversals/(.*)$': '<rootDir>/src/reversals/$1',
-        '^@audit/(.*)$': '<rootDir>/src/audit/$1',
-        '^@reporting/(.*)$': '<rootDir>/src/reporting/$1',
-        '^@health/(.*)$': '<rootDir>/src/health/$1',
-      },
       transform: {
         '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
       },
+      moduleNameMapper: sharedModuleNameMapper,
     },
     {
       displayName: 'integration',
-      testMatch: ['<rootDir>/tests/integration/**/*.spec.ts'],
-      // Integration tests run serially — never in parallel
-      // (they share the test database and the hash chain must be sequential)
-      runner: 'jest-runner',
       testEnvironment: 'node',
-      moduleNameMapper: {
-        '^@config/(.*)$': '<rootDir>/src/config/$1',
-        '^@common/(.*)$': '<rootDir>/src/common/$1',
-        '^@database/(.*)$': '<rootDir>/src/database/$1',
-        '^@accounts/(.*)$': '<rootDir>/src/accounts/$1',
-        '^@ledger/(.*)$': '<rootDir>/src/ledger/$1',
-        '^@transactions/(.*)$': '<rootDir>/src/transactions/$1',
-        '^@fx/(.*)$': '<rootDir>/src/fx/$1',
-        '^@reversals/(.*)$': '<rootDir>/src/reversals/$1',
-        '^@audit/(.*)$': '<rootDir>/src/audit/$1',
-        '^@reporting/(.*)$': '<rootDir>/src/reporting/$1',
-        '^@health/(.*)$': '<rootDir>/src/health/$1',
-      },
+      testMatch: ['<rootDir>/tests/integration/**/*.spec.ts'],
       transform: {
         '^.+\\.(t|j)s$': ['ts-jest', { tsconfig: 'tsconfig.json' }],
       },
-      // Give integration tests more time — they hit a real database
-      testTimeout: 30_000,
-      // CRITICAL: run integration tests serially to preserve hash chain order
-      maxWorkers: 1,
+      moduleNameMapper: sharedModuleNameMapper,
     },
   ],
 };
