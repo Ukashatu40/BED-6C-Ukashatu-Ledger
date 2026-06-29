@@ -1,98 +1,174 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+````md
+# BED-6C-Ukashatu-Ledger
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+**Neo-banking Ledger System with Double-Entry Accounting & Immutable Audit Trail**  
+Zetheta Algorithms Assessment BED-6C | Intern ID: 493556B
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## Overview
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+A production-grade financial ledger built on double-entry accounting principles with a cryptographic audit trail. Designed to the standards expected at Stripe, Revolut, Monzo, and similar fintech companies.
 
-## Project setup
+**Key capabilities:**
+
+- 20 transaction types with correct debit/credit patterns
+- SHA-256 hash chain on every ledger entry (tamper-evident)
+- PostgreSQL advisory locks preventing double-spend
+- `NUMERIC(19,4)` arithmetic throughout (zero floating point)
+- Multi-currency FX engine with stale-rate rejection
+- Full and partial reversals (3 fee policies)
+- Trial balance, income statement, balance sheet, and FX exposure reports
+- Idempotency on all state-mutating endpoints
+
+---
+
+## Quick Start
 
 ```bash
-$ npm install
+# 1. Clone and install
+git clone <repo-url>
+cd BED-6C-Ukashatu-Ledger
+npm install
+
+# 2. Configure environment
+cp .env.example .env
+# Edit .env if needed (defaults work with docker-compose)
+
+# 3. Start database
+docker compose up postgres -d
+
+# 4. Run migrations and seed
+npx prisma migrate deploy
+npm run db:seed
+
+# 5. Apply immutability triggers
+docker exec -i ledger_postgres psql -U ledger_user -d ledger_db \
+  < database/triggers/003_immutability_triggers.sql
+
+# 6. Start the API
+npm run start:dev
 ```
 
-## Compile and run the project
+**API:** `http://localhost:3000/api/v1`  
+**Swagger UI:** `http://localhost:3000/api/v1/docs`  
+**Health Check:** `http://localhost:3000/api/v1/health`
+
+---
+
+## Architecture
+
+```text
+src/
+├── accounts/       Chart of Accounts (26 accounts seeded)
+├── ledger/         Journal entry engine, hash chain, balance service
+├── transactions/   20 transaction type handlers + idempotency
+├── fx/             Exchange rate snapshots, stale-rate rejection
+├── reversals/      Full and partial refunds, no-mutation principle
+├── audit/          Hash chain verification, anomaly detection
+├── reporting/      Trial balance, income statement, balance sheet
+└── common/         Guards, filters, decorators, money types
+```
+
+**Tech stack:** NestJS 10 + Fastify | PostgreSQL 15 | Prisma 5 | decimal.js | UUID v7 | SHA-256
+
+---
+
+## API Reference
+
+All endpoints require the `X-API-Key` header. State-mutating endpoints additionally require the `X-Idempotency-Key` header.
+
+### Transactions
+
+- `POST /api/v1/transactions` — Process any of the 20 transaction types
+
+### Ledger
+
+- `POST /api/v1/ledger/journal-entries` — Post a journal entry directly
+- `GET /api/v1/ledger/journal-entries/:journalId` — Get journal lines
+- `GET /api/v1/ledger/accounts/:id/entries` — Account ledger entries
+- `GET /api/v1/ledger/accounts/:id/balance` — Derived account balance
+
+### Accounts
+
+- `GET /api/v1/accounts` — List Chart of Accounts
+- `GET /api/v1/accounts/:id` — Account by ID
+- `GET /api/v1/accounts/code/:code` — Account by code (e.g. `1001`)
+- `POST /api/v1/accounts` — Create new account
+- `PATCH /api/v1/accounts/:id/deactivate` — Deactivate account
+
+### FX
+
+- `POST /api/v1/fx/rates` — Ingest exchange rate snapshot
+- `GET /api/v1/fx/rates/current` — Current rate for currency pair
+- `GET /api/v1/fx/convert` — Preview conversion amount
+
+### Reversals
+
+- `POST /api/v1/reversals/full` — Full reversal
+- `POST /api/v1/reversals/partial` — Partial refund (`PROPORTIONAL` / `FULL` / `NONE`)
+
+### Reporting
+
+- `GET /api/v1/reports/trial-balance`
+- `GET /api/v1/reports/income-statement`
+- `GET /api/v1/reports/balance-sheet`
+- `GET /api/v1/reports/accounts/:id/statement`
+- `GET /api/v1/reports/fx-exposure`
+
+### Audit
+
+- `GET /api/v1/audit/verify` — Hash chain verification
+- `GET /api/v1/audit/anomalies` — Anomaly detection
+- `GET /api/v1/audit/export` — Regulatory export
+
+---
+
+## Testing
 
 ```bash
-# development
-$ npm run start
+# Unit tests (no database required)
+npm run test:unit
 
-# watch mode
-$ npm run start:dev
+# Integration tests
+npm run db:migrate:test
+npm run db:seed:test
+npm run test:integration
 
-# production mode
-$ npm run start:prod
+# Coverage report
+npm run test:cov
+
+# CLI utilities
+npm run hash:verify      # Verify full hash chain
+npm run trial-balance    # CLI trial balance check
 ```
 
-## Run tests
+---
 
-```bash
-# unit tests
-$ npm run test
+## Key Design Decisions
 
-# e2e tests
-$ npm run test:e2e
+| Decision         | Choice                               | Why                                                 |
+| ---------------- | ------------------------------------ | --------------------------------------------------- |
+| Balance storage  | Derived from ledger entries          | No update contention; immutable entries             |
+| Concurrency      | Advisory locks + ordered acquisition | Lower abort rate than `SERIALIZABLE`; deadlock-free |
+| Immutability     | Triggers + hash chain + app layer    | Three independent layers; DB-enforced               |
+| Money arithmetic | decimal.js + `NUMERIC(19,4)`         | Prevents floating-point precision issues            |
+| IDs              | UUID v7                              | Time-sortable; no enumeration attacks               |
+| FX rates         | Snapshot with validity windows       | Stale-rate detection (Incident Day 6)               |
 
-# test coverage
-$ npm run test:cov
-```
+---
 
-## Deployment
+## Spec Errors Identified
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+See `docs/submission-notes.md` for a full analysis of the four deliberate errors found in the specification, how they were identified, and how the implementation corrects them.
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+---
 
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
+## Compliance Notes
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- RBI Master Directions: 10-year data retention policy implemented
+- SOX Section 802: immutability triggers prevent record alteration
+- PSD2: full audit trail with cryptographic integrity proof
+- FEMA: LRS quota tracking on international transfers (metadata)
+- IndAS 21: FX revaluation batch job scaffold (unrealised P&L)
+````
