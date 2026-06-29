@@ -1,4 +1,3 @@
-````md
 # BED-6C-Ukashatu-Ledger
 
 **Neo-banking Ledger System with Double-Entry Accounting & Immutable Audit Trail**  
@@ -171,4 +170,3 @@ See `docs/submission-notes.md` for a full analysis of the four deliberate errors
 - PSD2: full audit trail with cryptographic integrity proof
 - FEMA: LRS quota tracking on international transfers (metadata)
 - IndAS 21: FX revaluation batch job scaffold (unrealised P&L)
-````
