@@ -9,7 +9,7 @@ import { LedgerService } from '@ledger/ledger.service';
 import { TrialBalanceService } from '@reporting/trial-balance.service';
 import { DatabaseService } from '@database/database.service';
 import { PrismaClient } from '@prisma/client';
-import { cleanDatabase } from './setup';
+import { cleanDatabase, closePrisma } from './setup';
 import appConfig from '@config/app.config';
 import databaseConfig from '@config/database.config';
 
@@ -61,6 +61,7 @@ describe('TrialBalanceService (integration)', () => {
 
   afterAll(async () => {
     await app.close();
+    await closePrisma();
   });
 
   async function postDeposit(amount: string, refId: string): Promise<void> {

@@ -205,12 +205,16 @@ describe('LedgerService (integration)', () => {
     });
 
     it('prevents double-spend with insufficient balance', async () => {
-      // Deposit INR 500
+      // Deposit INR 500 into wallet
       await postDeposit('500.0000', '01932a1b-0000-7000-8000-000000000010');
 
-      // Attempt to withdraw INR 1000 from the WALLET — balance check on walletAccountId
-      // The withdrawal pattern: DEBIT liability / CREDIT wallet
-      // checkBalanceOn: [walletAccountId] checks the wallet's derived balance
+      // Verify deposit worked
+      const balanceBefore = await ledger.getAccountBalance(walletAccountId);
+      expect(balanceBefore).toBe('500.0000');
+
+      // Attempt to withdraw INR 1000 — wallet only has 500
+      // Pass walletAccountId in checkBalanceOn — service will verify
+      // current wallet balance (500) >= requested amount (1000)
       await expect(
         ledger.postJournalEntry(
           {
@@ -236,12 +240,7 @@ describe('LedgerService (integration)', () => {
           },
           'test_actor',
           undefined,
-          // checkBalanceOn wallet — wallet has 500, requesting 1000 from it
-          // BUT: wallet is being CREDITED here (withdrawal reduces liability, credits wallet)
-          // The balance check must be on the account being reduced
-          // For withdrawal: wallet balance decreases → check wallet's CURRENT balance
-          // vs the CREDIT amount. We need a dedicated check here.
-          { checkBalanceOn: [] }, // See note below
+          { checkBalanceOn: [walletAccountId] },
         ),
       ).rejects.toThrow('Insufficient balance');
     });

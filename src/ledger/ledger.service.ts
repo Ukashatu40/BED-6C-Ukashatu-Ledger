@@ -90,10 +90,11 @@ export class LedgerService {
 
       // Check balance only on the specified accounts
       for (const accountId of balanceCheckAccountIds) {
-        const line = lines.find((l) => l.accountId === accountId && l.entryType === 'DEBIT');
+        const line = lines.find((l) => l.accountId === accountId);
         if (!line) continue;
 
         const currentBalance = await this.balance.deriveBalanceLocked(tx, accountId);
+
         if (currentBalance.lt(line.amountDecimal)) {
           throw new UnprocessableEntityException(
             `Insufficient balance on account ${accountId}: ` +

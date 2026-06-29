@@ -7,7 +7,7 @@ import { DatabaseModule } from '@database/database.module';
 import { LedgerModule } from '@ledger/ledger.module';
 import { LedgerService } from '@ledger/ledger.service';
 import { DatabaseService } from '@database/database.service';
-import { cleanDatabase } from './setup';
+import { cleanDatabase, closePrisma } from './setup';
 import appConfig from '@config/app.config';
 import databaseConfig from '@config/database.config';
 
@@ -50,6 +50,7 @@ describe('Concurrency — double-spend prevention (integration)', () => {
 
   afterAll(async () => {
     await app.close();
+    await closePrisma();
   });
 
   async function postDeposit(amount: string, refId: string): Promise<void> {
@@ -110,6 +111,8 @@ describe('Concurrency — double-spend prevention (integration)', () => {
         },
         'system',
         undefined,
+        // CRITICAL: pass walletId so balance check fires on the wallet
+        // regardless of it being a CREDIT line
         { checkBalanceOn: [walletId] },
       );
       return 'success';
@@ -121,6 +124,7 @@ describe('Concurrency — double-spend prevention (integration)', () => {
   it('prevents double-spend: balance never goes negative', async () => {
     await postDeposit('10000.0000', '01932a1b-0000-7000-8000-000000000400');
 
+    // 20 concurrent withdrawal attempts of INR 1000 each
     const attempts = Array.from({ length: 20 }, (_, i) =>
       attemptWithdrawal(
         '1000.0000',
@@ -132,12 +136,16 @@ describe('Concurrency — double-spend prevention (integration)', () => {
     const outcomes = results.map((r) => (r.status === 'fulfilled' ? r.value : 'error'));
     const successes = outcomes.filter((o) => o === 'success').length;
 
-    // At most 10 can succeed (10000 / 1000 = 10)
+    // Never more than 10 should succeed (10000 / 1000 = 10 max)
     expect(successes).toBeLessThanOrEqual(10);
 
-    // Final balance must never be negative
+    // THE critical invariant: balance must never be negative
     const finalBalance = await ledger.getAccountBalance(walletId);
     expect(parseFloat(finalBalance)).toBeGreaterThanOrEqual(0);
+
+    // Total withdrawn must not exceed deposited
+    const totalWithdrawn = successes * 1000;
+    expect(totalWithdrawn).toBeLessThanOrEqual(10000);
   });
 
   it('account balance never goes negative under concurrent load', async () => {
@@ -155,7 +163,14 @@ describe('Concurrency — double-spend prevention (integration)', () => {
     const balance = await ledger.getAccountBalance(walletId);
     const balanceNum = parseFloat(balance);
 
+    // Core invariant — never negative
     expect(balanceNum).toBeGreaterThanOrEqual(0);
+
+    // At most 10 withdrawals of 500 can succeed against 5000 balance
+    const entries = await (db as unknown as PrismaClient).ledgerEntry.findMany({
+      where: { status: 'POSTED', referenceType: 'CUSTOMER_WITHDRAWAL_BANK' },
+    });
+    expect(entries.length).toBeLessThanOrEqual(20); // 10 withdrawals × 2 lines each
   });
 
   it('trial balance remains balanced after concurrent transactions', async () => {
