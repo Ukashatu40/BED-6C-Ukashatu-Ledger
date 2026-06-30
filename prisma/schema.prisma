@@ -193,37 +193,27 @@ model Account {
 /// with the previous entry's hash. This forms a cryptographic chain that makes
 /// any tampering detectable — the hash chain breaks at the tampered entry.
 model LedgerEntry {
-  id            String      @id @default(uuid()) @db.Uuid
-  /// Groups all debit/credit lines of a single financial event together
+  id            String      @default(uuid()) @db.Uuid
   journalId     String      @map("journal_id") @db.Uuid
   accountId     String      @map("account_id") @db.Uuid
   account       Account     @relation(fields: [accountId], references: [id])
   entryType     EntryType   @map("entry_type")
-  /// NUMERIC(19,4): supports up to 999,999,999,999,999.9999 — never FLOAT
   amount        Decimal     @db.Decimal(19, 4)
-  /// ISO 4217 — must match the account's currency
   currency      String      @db.Char(3)
   status        EntryStatus @default(PENDING)
-  /// When the transaction economically takes effect (may differ from posted_at)
   effectiveDate DateTime    @map("effective_date") @db.Timestamptz()
-  /// When this system recorded the entry — set by DB DEFAULT NOW(), immutable
   postedAt      DateTime?   @map("posted_at") @db.Timestamptz()
-  /// The user, service, or system actor that initiated this entry
   createdBy     String      @map("created_by") @db.VarChar(255)
-  /// Client-supplied key preventing duplicate processing of the same transaction
   idempotencyKey String?    @map("idempotency_key") @db.VarChar(128)
-  /// Type of originating transaction for filtering and reporting
   referenceType  TransactionType  @map("reference_type")
-  /// UUID of the originating transaction record
   referenceId    String      @map("reference_id") @db.Uuid
-  /// Human-readable description for account statements
   narrative      String      @db.Text
-  /// SHA-256 hash of (own data fields + previous_hash) — forms the audit chain
   hash           String      @db.Char(64)
-  /// Hash of the immediately preceding entry — '000...000' for genesis entry
   previousHash   String      @map("previous_hash") @db.Char(64)
-  /// Extensible: IP address, device ID, geolocation, session ID
   metadata       Json?       @db.JsonB
+
+  // Partitioned tables require the partition key in the primary key
+  @@id([id, effectiveDate])
 
   @@index([journalId])
   @@index([accountId])
@@ -233,7 +223,6 @@ model LedgerEntry {
   @@index([status])
   @@index([currency])
   @@index([createdBy])
-  /// Composite: account + date — primary access pattern for statements
   @@index([accountId, effectiveDate])
   @@map("ledger_entries")
 }
