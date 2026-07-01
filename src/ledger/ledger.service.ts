@@ -82,7 +82,7 @@ export class LedgerService {
 
     const postedEntries: LedgerEntry[] = [];
 
-    await this.db.withTransaction(async (tx) => {
+    await this.db.withRetryTransaction(async (tx) => {
       // Acquire advisory locks only on accounts we need to balance-check
       if (balanceCheckAccountIds.length > 0) {
         await this.db.acquireAdvisoryLocks(tx, balanceCheckAccountIds);

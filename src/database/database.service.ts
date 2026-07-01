@@ -162,6 +162,47 @@ export class DatabaseService extends PrismaClient implements OnModuleInit, OnMod
     });
   }
 
+  async withRetryTransaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+    options?: {
+      maxRetries?: number;
+      isolationLevel?: IsolationLevel;
+    },
+  ): Promise<T> {
+    const maxRetries = options?.maxRetries ?? 3;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.withTransaction(callback, {
+          isolationLevel: options?.isolationLevel ?? 'ReadCommitted',
+        });
+      } catch (error) {
+        lastError = error;
+        const msg = error instanceof Error ? error.message : String(error);
+
+        // Only retry on conflict errors — not on business rule violations
+        if (
+          msg.includes('TransactionWriteConflict') ||
+          msg.includes('deadlock detected') ||
+          msg.includes('could not serialize')
+        ) {
+          if (attempt < maxRetries) {
+            // Exponential backoff: 50ms, 100ms, 200ms
+            await new Promise((resolve) => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)));
+            this.logger.warn(
+              `Transaction conflict on attempt ${attempt.toString()}/${maxRetries.toString()} — retrying`,
+            );
+            continue;
+          }
+        }
+        // Non-retryable error or max retries exceeded — rethrow
+        throw error;
+      }
+    }
+    throw lastError;
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // Advisory Lock Helpers
   //
