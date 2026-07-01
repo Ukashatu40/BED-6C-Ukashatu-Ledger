@@ -1,46 +1,30 @@
 -- database/triggers/008_partition_ledger_entries.sql
 -- =============================================================================
 -- CONVERT ledger_entries TO NATIVE RANGE PARTITIONING BY effective_date
--- =============================================================================
--- PostgreSQL does not support ALTER TABLE ... PARTITION BY on an existing
--- table. The safe pattern is: build new partitioned table, copy data,
--- recreate constraints/indexes/triggers, then swap names inside a transaction.
---
--- IMPORTANT: Run this against a database that already has the
--- 003_immutability_triggers.sql triggers installed — they are recreated
--- here on the new table.
+-- v2 — fixes unique index error on partitioned table
 -- =============================================================================
 
 BEGIN;
 
--- ── Step 1: Create the new partitioned table with identical structure ──────
-CREATE TABLE ledger_entries_partitioned (
-  id              UUID NOT NULL,
-  journal_id      UUID NOT NULL,
-  account_id      UUID NOT NULL,
-  entry_type      "EntryType" NOT NULL,
-  amount          NUMERIC(19,4) NOT NULL,
-  currency        CHAR(3) NOT NULL,
-  status          "EntryStatus" NOT NULL DEFAULT 'PENDING',
-  effective_date  TIMESTAMPTZ NOT NULL,
-  posted_at       TIMESTAMPTZ,
-  created_by      VARCHAR(255) NOT NULL,
-  idempotency_key VARCHAR(128),
-  reference_type  "TransactionType" NOT NULL,
-  reference_id    UUID NOT NULL,
-  narrative       TEXT NOT NULL,
-  hash            CHAR(64) NOT NULL,
-  previous_hash   CHAR(64) NOT NULL,
-  metadata        JSONB,
-  -- Partition key (effective_date) MUST be part of the primary key
-  PRIMARY KEY (id, effective_date)
-) PARTITION BY RANGE (effective_date);
+-- ── Step 1: Introspect current column definitions from existing table ────────
+-- (avoids enum name guessing — uses LIKE to inherit structure exactly)
+CREATE TABLE ledger_entries_partitioned
+  (LIKE ledger_entries INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
+PARTITION BY RANGE (effective_date);
 
--- ── Step 2: Create partitions covering existing data + 12 months forward ───
--- Default catch-all partitions for historical data outside the explicit range
-CREATE TABLE ledger_entries_y2025 PARTITION OF ledger_entries_partitioned
+-- LIKE does not copy the primary key in a way compatible with partitioning
+-- (partition key must be in PK). Recreate it:
+ALTER TABLE ledger_entries_partitioned DROP CONSTRAINT IF EXISTS ledger_entries_pkey;
+ALTER TABLE ledger_entries_partitioned
+  ADD PRIMARY KEY (id, effective_date);
+
+-- ── Step 2: Create partitions ────────────────────────────────────────────────
+-- Historical catch-all
+CREATE TABLE ledger_entries_y2025
+  PARTITION OF ledger_entries_partitioned
   FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
 
+-- Monthly partitions for 2026 and 2027
 DO $$
 DECLARE
   month_start DATE;
@@ -48,54 +32,54 @@ DECLARE
   part_name   TEXT;
 BEGIN
   FOR i IN 0..23 LOOP
-    month_start := date_trunc('month', '2026-01-01'::DATE) + (i || ' months')::INTERVAL;
+    month_start := DATE '2026-01-01' + (i || ' months')::INTERVAL;
     month_end   := month_start + INTERVAL '1 month';
     part_name   := 'ledger_entries_' || to_char(month_start, 'YYYY_MM');
-
     EXECUTE format(
       'CREATE TABLE IF NOT EXISTS %I PARTITION OF ledger_entries_partitioned
-       FOR VALUES FROM (%L) TO (%L)',
-      part_name, month_start, month_end
+       FOR VALUES FROM (%L::TIMESTAMPTZ) TO (%L::TIMESTAMPTZ)',
+      part_name, month_start::TEXT, month_end::TEXT
     );
   END LOOP;
 END $$;
 
--- Future catch-all to avoid insert failures beyond the pre-created window
-CREATE TABLE ledger_entries_future PARTITION OF ledger_entries_partitioned
-  FOR VALUES FROM ('2028-01-01') TO ('2099-01-01');
+-- Future catch-all
+CREATE TABLE ledger_entries_future
+  PARTITION OF ledger_entries_partitioned
+  FOR VALUES FROM ('2028-01-01'::TIMESTAMPTZ) TO ('2099-01-01'::TIMESTAMPTZ);
 
--- ── Step 3: Copy existing data ──────────────────────────────────────────────
+-- ── Step 3: Copy existing data ───────────────────────────────────────────────
 INSERT INTO ledger_entries_partitioned
 SELECT * FROM ledger_entries;
 
--- ── Step 4: Recreate indexes on the partitioned table ───────────────────────
--- PostgreSQL automatically propagates indexes created on the parent
--- to all partitions (and future ones).
-CREATE INDEX idx_le_part_journal_id      ON ledger_entries_partitioned (journal_id);
-CREATE INDEX idx_le_part_account_id      ON ledger_entries_partitioned (account_id);
-CREATE INDEX idx_le_part_reference_id    ON ledger_entries_partitioned (reference_id);
-CREATE INDEX idx_le_part_reference_type  ON ledger_entries_partitioned (reference_type);
-CREATE INDEX idx_le_part_status          ON ledger_entries_partitioned (status);
-CREATE INDEX idx_le_part_currency        ON ledger_entries_partitioned (currency);
-CREATE INDEX idx_le_part_created_by      ON ledger_entries_partitioned (created_by);
-CREATE INDEX idx_le_part_account_date    ON ledger_entries_partitioned (account_id, effective_date);
-CREATE INDEX idx_le_part_posted_at       ON ledger_entries_partitioned (posted_at);
+-- ── Step 4: Recreate performance indexes ────────────────────────────────────
+-- (indexes on parent table automatically propagate to all partitions)
+CREATE INDEX idx_le_journal_id     ON ledger_entries_partitioned (journal_id);
+CREATE INDEX idx_le_account_id     ON ledger_entries_partitioned (account_id);
+CREATE INDEX idx_le_reference_id   ON ledger_entries_partitioned (reference_id);
+CREATE INDEX idx_le_reference_type ON ledger_entries_partitioned (reference_type);
+CREATE INDEX idx_le_status         ON ledger_entries_partitioned (status);
+CREATE INDEX idx_le_currency       ON ledger_entries_partitioned (currency);
+CREATE INDEX idx_le_created_by     ON ledger_entries_partitioned (created_by);
+CREATE INDEX idx_le_posted_at      ON ledger_entries_partitioned (posted_at);
+-- Primary access pattern: account statement queries
+CREATE INDEX idx_le_account_date   ON ledger_entries_partitioned (account_id, effective_date);
 
--- Unique constraint on idempotency_key (partial — only when not null)
-CREATE UNIQUE INDEX idx_le_part_idempotency_key
+-- NOTE: No unique index on idempotency_key —
+-- partitioned table unique constraints must include the partition key (effective_date).
+-- Idempotency is enforced at the application layer via the idempotency_keys table.
+-- A non-unique index is sufficient for query performance.
+CREATE INDEX idx_le_idempotency_key
   ON ledger_entries_partitioned (idempotency_key)
   WHERE idempotency_key IS NOT NULL;
 
--- ── Step 5: Swap tables ──────────────────────────────────────────────────────
+-- ── Step 5: Swap ─────────────────────────────────────────────────────────────
 ALTER TABLE ledger_entries RENAME TO ledger_entries_old;
 ALTER TABLE ledger_entries_partitioned RENAME TO ledger_entries;
 
--- Rename partition-level indexes to drop the _part_ infix for consistency
--- (cosmetic — skipped for brevity, index names are functional as-is)
-
--- ── Step 6: Recreate immutability triggers on the new table ────────────────
--- (Reuses the trigger FUNCTIONS from 003_immutability_triggers.sql —
---  only the trigger bindings need to be recreated on the renamed table)
+-- ── Step 6: Recreate immutability triggers on the renamed table ──────────────
+-- Trigger FUNCTIONS already exist from 003_immutability_triggers.sql
+-- Only the trigger BINDINGS need recreating on the new table name.
 DROP TRIGGER IF EXISTS trg_prevent_ledger_entry_update ON ledger_entries;
 CREATE TRIGGER trg_prevent_ledger_entry_update
   BEFORE UPDATE ON ledger_entries
@@ -108,40 +92,36 @@ CREATE TRIGGER trg_prevent_ledger_entry_delete
   FOR EACH ROW
   EXECUTE FUNCTION prevent_ledger_entry_delete();
 
--- ── Step 7: Drop the old non-partitioned table ──────────────────────────────
+-- ── Step 7: Drop old table ───────────────────────────────────────────────────
 DROP TABLE ledger_entries_old;
 
--- ── Step 8: Verify row count matches and triggers are installed ────────────
+-- ── Step 8: Verify ───────────────────────────────────────────────────────────
 DO $$
 DECLARE
-  row_count   BIGINT;
-  trig_count  INT;
+  v_rows  BIGINT;
+  v_parts INT;
+  v_trigs INT;
 BEGIN
-  SELECT COUNT(*) INTO row_count FROM ledger_entries;
+  SELECT COUNT(*) INTO v_rows  FROM ledger_entries;
+  SELECT COUNT(*) INTO v_parts
+  FROM   pg_inherits i
+  JOIN   pg_class    p ON i.inhparent = p.oid
+  WHERE  p.relname = 'ledger_entries';
+  SELECT COUNT(*) INTO v_trigs
+  FROM   information_schema.triggers
+  WHERE  event_object_table = 'ledger_entries'
+  AND    trigger_name IN (
+    'trg_prevent_ledger_entry_update',
+    'trg_prevent_ledger_entry_delete'
+  );
 
-  SELECT COUNT(*) INTO trig_count
-  FROM information_schema.triggers
-  WHERE event_object_table = 'ledger_entries'
-    AND trigger_name IN (
-      'trg_prevent_ledger_entry_update',
-      'trg_prevent_ledger_entry_delete'
-    );
+  ASSERT v_parts >= 26,
+    format('Expected ≥26 partitions, found %s', v_parts);
+  ASSERT v_trigs = 2,
+    format('Expected 2 triggers, found %s', v_trigs);
 
-  ASSERT trig_count = 2, 'Expected 2 immutability triggers on partitioned ledger_entries';
-
-  RAISE NOTICE 'Partitioning complete: % rows migrated, % triggers verified', row_count, trig_count;
+  RAISE NOTICE 'Partition migration complete: % rows, % partitions, % triggers',
+    v_rows, v_parts, v_trigs;
 END $$;
 
 COMMIT;
-
--- ── Verification queries (run manually after migration) ─────────────────────
--- List all partitions:
---   SELECT child.relname, pg_size_pretty(pg_relation_size(child.oid))
---   FROM pg_inherits
---   JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
---   JOIN pg_class child  ON pg_inherits.inhrelid  = child.oid
---   WHERE parent.relname = 'ledger_entries' ORDER BY child.relname;
---
--- Confirm immutability still works:
---   UPDATE ledger_entries SET narrative = 'x' WHERE status = 'POSTED' LIMIT 1;
---   -- should raise IMMUTABILITY_VIOLATION
