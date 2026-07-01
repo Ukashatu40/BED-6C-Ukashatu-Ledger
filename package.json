@@ -33,6 +33,8 @@
     "db:migrate:test": "cross-env DATABASE_URL=postgresql://ledger_user:ledger_pass@localhost:5433/ledger_test_db?schema=public prisma migrate deploy",
     "db:seed:test": "cross-env DATABASE_URL=postgresql://ledger_user:ledger_pass@localhost:5433/ledger_test_db?schema=public ts-node -r tsconfig-paths/register seeds/seed.ts",
     "hash:verify": "ts-node -r tsconfig-paths/register scripts/verify-hashes.ts",
+    "test:load:withdrawal": "k6 run tests/load/concurrent-withdrawal.js",
+    "test:load:migration": "k6 run tests/load/migration-during-load.js",
     "trial-balance": "ts-node -r tsconfig-paths/register scripts/trial-balance-check.ts",
     "partitions:manage": "ts-node -r tsconfig-paths/register scripts/manage-partitions.ts"
   },
