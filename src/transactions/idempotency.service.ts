@@ -60,44 +60,71 @@ export class IdempotencyService {
   ): Promise<IdempotencyResult> {
     const requestHash = this.hashRequestBody(requestBody);
     const expiresAt = new Date(Date.now() + this.ttlHours * 60 * 60 * 1000);
+    const maxRetries = 3;
+    let lastError: unknown;
 
-    return this.db.withSerializableTransaction(async (tx) => {
-      const client = tx as DatabaseService;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.db.withSerializableTransaction(async (tx) => {
+          const client = tx as DatabaseService;
 
-      const existing = await client.idempotencyKey.findUnique({
-        where: {
-          key_userId: { key, userId },
-        },
-      });
+          const existing = await client.idempotencyKey.findUnique({
+            where: { key_userId: { key, userId } },
+          });
 
-      if (existing) {
-        // Same key, different body → conflict
-        if (existing.requestHash !== requestHash) {
-          throw new ConflictException(
-            `Idempotency key "${key}" was already used for a different request. ` +
-              `Use a new idempotency key for this request.`,
+          if (existing) {
+            if (existing.requestHash !== requestHash) {
+              throw new ConflictException(
+                `Idempotency key "${key}" was already used for a different request. ` +
+                  `Use a new idempotency key for this request.`,
+              );
+            }
+            this.logger.log(
+              `Idempotency key "${key}" already exists for user ${userId} — replaying`,
+            );
+            return { isNew: false, keyRecord: existing };
+          }
+
+          const keyRecord = await client.idempotencyKey.create({
+            data: {
+              id: uuidv7(),
+              key,
+              userId,
+              endpoint,
+              requestHash,
+              status: 'PROCESSING',
+              expiresAt,
+            },
+          });
+
+          return { isNew: true, keyRecord };
+        });
+      } catch (error) {
+        // ConflictException is a business error — never retry
+        if (error instanceof ConflictException) throw error;
+
+        const msg = error instanceof Error ? error.message : String(error);
+        const isRetryable =
+          msg.includes('write conflict') ||
+          msg.includes('TransactionWriteConflict') ||
+          msg.includes('deadlock') ||
+          msg.includes('could not serialize') ||
+          msg.includes('Transaction failed due to a write conflict');
+
+        if (isRetryable && attempt < maxRetries) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, 50 * Math.pow(2, attempt - 1)));
+          this.logger.warn(
+            `Idempotency write conflict attempt ${attempt.toString()}/${maxRetries.toString()} — retrying key "${key}"`,
           );
+          continue;
         }
 
-        this.logger.log(`Idempotency key "${key}" already exists for user ${userId} — replaying`);
-        return { isNew: false, keyRecord: existing };
+        throw error;
       }
+    }
 
-      // New key — insert and reserve
-      const keyRecord = await client.idempotencyKey.create({
-        data: {
-          id: uuidv7(),
-          key,
-          userId,
-          endpoint,
-          requestHash,
-          status: 'PROCESSING',
-          expiresAt,
-        },
-      });
-
-      return { isNew: true, keyRecord };
-    });
+    throw lastError;
   }
 
   /**
