@@ -12,25 +12,26 @@
 //   - The account balance NEVER goes negative (verified by the teardown check)
 //   - Zero unhandled errors (500s) — all failures are clean business rejections
 
+// tests/load/concurrent-withdrawal.js
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
 
-// ── Custom metrics ──────────────────────────────────────────────────────────
 const successfulWithdrawals = new Counter('successful_withdrawals');
 const insufficientBalance = new Counter('insufficient_balance_rejections');
 const unexpectedErrors = new Counter('unexpected_errors');
 const withdrawalDuration = new Trend('withdrawal_duration_ms', true);
 const successRate = new Rate('withdrawal_success_rate');
 
-// ── Configuration ───────────────────────────────────────────────────────────
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:3000/api/v1';
 const API_KEY = __ENV.API_KEY || 'dev-api-key-change-in-production';
-const WALLET_ID = __ENV.WALLET_ID || ''; // Set by setup or pass via --env
+const WALLET_ID = __ENV.WALLET_ID || '';
 const LIABILITY_ID = __ENV.LIABILITY_ID || '';
 
+// Unique per k6 execution — prevents idempotency key collisions across runs
+const RUN_ID = Date.now().toString(36);
+
 export const options = {
-  // 50 concurrent virtual users — all fire simultaneously
   scenarios: {
     concurrent_withdrawals: {
       executor: 'shared-iterations',
@@ -40,17 +41,9 @@ export const options = {
     },
   },
   thresholds: {
-    // Core financial invariants — these must be absolute
-    successful_withdrawals: ['count<=20'], // never more than balance allows
-
-    // Infrastructure quality — allow small retry failure rate under extreme concurrency
-    // 50 simultaneous requests to same account is intentionally extreme
+    successful_withdrawals: ['count<=20'],
     http_req_duration: ['p(99)<5000'],
-
-    // Custom metric: zero UNEXPECTED errors means zero 500s that aren't
-    // write conflicts (write conflicts are retryable infrastructure events,
-    // not application bugs)
-    // Note: We track write conflicts separately via logs
+    unexpected_errors: ['count==0'],
   },
 };
 
@@ -61,7 +54,6 @@ const HEADERS = {
 };
 
 export function setup() {
-  // Verify the app is reachable
   const health = http.get(`${BASE_URL}/health`);
   if (health.status !== 200) {
     throw new Error(`App not healthy: ${health.status.toString()}`);
@@ -75,37 +67,39 @@ export function setup() {
     );
   }
 
-  // Seed INR 10,000 into the wallet before the test
-  const depositPayload = JSON.stringify({
-    type: 'CUSTOMER_DEPOSIT_BANK',
-    effectiveDate: new Date().toISOString(),
-    payload: {
-      walletAccountId: WALLET_ID,
-      liabilityAccountId: LIABILITY_ID,
-      amount: '10000.0000',
-      currency: 'INR',
-      reference: 'k6-load-test-seed',
+  // Seed INR 10,000 — unique idempotency key per run
+  const depositResp = http.post(
+    `${BASE_URL}/transactions`,
+    JSON.stringify({
+      type: 'CUSTOMER_DEPOSIT_BANK',
+      effectiveDate: new Date().toISOString(),
+      payload: {
+        walletAccountId: WALLET_ID,
+        liabilityAccountId: LIABILITY_ID,
+        amount: '10000.0000',
+        currency: 'INR',
+        reference: 'k6-load-test-seed',
+      },
+    }),
+    {
+      headers: {
+        ...HEADERS,
+        'X-Idempotency-Key': `k6-seed-${RUN_ID}`,
+      },
     },
-  });
-
-  const depositResp = http.post(`${BASE_URL}/transactions`, depositPayload, {
-    headers: {
-      ...HEADERS,
-      'X-Idempotency-Key': `k6-seed-deposit-${Date.now().toString()}`,
-    },
-  });
+  );
 
   if (depositResp.status !== 201) {
     throw new Error(`Seed deposit failed: ${depositResp.status.toString()} ${depositResp.body}`);
   }
 
-  console.log('✅ Seed deposit of INR 10,000 successful');
-  return { walletId: WALLET_ID, liabilityId: LIABILITY_ID };
+  console.log(`✅ Run ${RUN_ID}: Seed deposit of INR 10,000 successful`);
+  return { walletId: WALLET_ID, liabilityId: LIABILITY_ID, runId: RUN_ID };
 }
 
 export default function (data) {
-  // Each VU gets a unique idempotency key
-  const idempotencyKey = `k6-withdrawal-${__VU.toString()}-${__ITER.toString()}`;
+  // Unique key: run ID + VU number + iteration — never collides across runs
+  const idempotencyKey = `k6-${data.runId}-${__VU.toString()}-${__ITER.toString()}`;
 
   const payload = JSON.stringify({
     type: 'CUSTOMER_WITHDRAWAL_BANK',
@@ -120,99 +114,99 @@ export default function (data) {
   });
 
   const start = Date.now();
-
   const resp = http.post(`${BASE_URL}/transactions`, payload, {
-    headers: {
-      ...HEADERS,
-      'X-Idempotency-Key': idempotencyKey,
-    },
+    headers: { ...HEADERS, 'X-Idempotency-Key': idempotencyKey },
   });
-
   withdrawalDuration.add(Date.now() - start);
 
   if (resp.status === 201) {
     successfulWithdrawals.add(1);
     successRate.add(true);
-
     check(resp, {
       'successful withdrawal returns 201': (r) => r.status === 201,
       'response has transactionId': (r) => JSON.parse(r.body).transactionId !== undefined,
       'totalDebits equals totalCredits': (r) => {
-        const body = JSON.parse(r.body);
-        return body.totalDebits === body.totalCredits;
+        const b = JSON.parse(r.body);
+        return b.totalDebits === b.totalCredits;
       },
     });
   } else if (resp.status === 422) {
     insufficientBalance.add(1);
     successRate.add(false);
-
     check(resp, {
       '422 has structured error response': (r) => {
-        const body = JSON.parse(r.body);
-        return body.error !== undefined && body.error.type !== undefined;
+        const b = JSON.parse(r.body);
+        return b.error !== undefined && b.error.type !== undefined;
       },
-      '422 error type is INSUFFICIENT_BALANCE or BUSINESS_RULE': (r) => {
-        const body = JSON.parse(r.body);
-        return ['INSUFFICIENT_BALANCE', 'BUSINESS_RULE_VIOLATION'].includes(body.error.type);
+      '422 is INSUFFICIENT_BALANCE or BUSINESS_RULE': (r) => {
+        const b = JSON.parse(r.body);
+        return ['INSUFFICIENT_BALANCE', 'BUSINESS_RULE_VIOLATION'].includes(b.error.type);
       },
     });
   } else {
-    const body = JSON.parse(resp.body);
+    // Classify the failure
+    let body;
+    try {
+      body = JSON.parse(resp.body);
+    } catch {
+      body = {};
+    }
 
-    // Write conflicts are retryable infrastructure events, not bugs
     const isWriteConflict =
-      resp.status === 500 &&
+      resp.status === 500 && body.error && (body.error.message || '').includes('write conflict');
+
+    const isStaleIdempotencyKey =
+      resp.status === 409 &&
       body.error &&
-      (body.error.message.includes('write conflict') ||
-        body.error.message.includes('TransactionWriteConflict') ||
-        body.error.message.includes('Transaction failed due to a write conflict'));
+      (body.error.message || '').includes('already used for a different request');
 
     if (isWriteConflict) {
-      // This is acceptable under extreme concurrency — log but don't fail threshold
-      console.warn(`Write conflict on VU ${__VU.toString()} — would retry in production`);
+      // Advisory lock serialized the requests — infrastructure, not a bug
+      console.warn(`Write conflict VU=${__VU.toString()} — retry would resolve`);
+    } else if (isStaleIdempotencyKey) {
+      // Keys from a previous run — means db wasn't wiped before this run
+      console.error(`Stale idempotency key VU=${__VU.toString()} — wipe DB before running`);
+      unexpectedErrors.add(1);
     } else {
       unexpectedErrors.add(1);
-      console.error(`Unexpected response: status=${resp.status.toString()} body=${resp.body}`);
+      console.error(`Unexpected: status=${resp.status.toString()} body=${resp.body}`);
     }
   }
 }
 
 export function teardown(data) {
-  // Final balance check — must not be negative
+  // Balance check
   const balanceResp = http.get(`${BASE_URL}/ledger/accounts/${data.walletId}/balance`, {
     headers: HEADERS,
   });
 
   check(balanceResp, {
     'balance endpoint returns 200': (r) => r.status === 200,
+    'CRITICAL: balance is not negative': (r) => {
+      const b = JSON.parse(r.body);
+      return parseFloat(b.balance) >= 0;
+    },
   });
 
   if (balanceResp.status === 200) {
-    const body = JSON.parse(balanceResp.body);
-    const balance = parseFloat(body.balance);
-
-    check(balanceResp, {
-      'CRITICAL: balance is not negative': () => balance >= 0,
-    });
-
-    console.log(`\n📊 Final wallet balance: INR ${body.balance}`);
-    console.log(`   Balance >= 0: ${(balance >= 0).toString()} — no double-spend occurred`);
+    const b = JSON.parse(balanceResp.body);
+    console.log(`\n📊 Final wallet balance: INR ${b.balance}`);
+    console.log(`   Balance >= 0: ${(parseFloat(b.balance) >= 0).toString()} — no double-spend`);
   }
 
-  // Hash chain verification — scope to last 10 minutes only
-  const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  const auditResp = http.get(`${BASE_URL}/audit/verify?from=${tenMinutesAgo}`, {
+  // Hash chain — scope to this run only (last 5 minutes)
+  const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const auditResp = http.get(`${BASE_URL}/audit/verify?from=${fiveMinutesAgo}`, {
     headers: HEADERS,
   });
 
   if (auditResp.status === 200) {
     const audit = JSON.parse(auditResp.body);
     check(auditResp, {
-      'hash chain valid for entries created during load test': () =>
-        audit.chainResult.valid === true,
+      'hash chain valid for this run': () => audit.chainResult.valid === true,
     });
     console.log(
-      `🔐 Hash chain (last 10 min): ${audit.chainResult.valid ? 'VALID' : 'BROKEN'} ` +
+      `🔐 Hash chain (last 5 min): ${audit.chainResult.valid ? 'VALID' : 'BROKEN'} ` +
         `(${audit.chainResult.totalEntries.toString()} entries)`,
     );
   }
